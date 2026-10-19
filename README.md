@@ -89,3 +89,5 @@ Results are saved inside each experiment, including:
 | `processing_report.csv`, `study_stages_report.csv`, and log files | Progress and errors |
 
 **Calibration note.** Spectralon reflectance is assumed to be 1 at each wavelength. The resulting data represent *relative reflectance*, and their accuracy depends on consistent imaging conditions and suitable reference measurements. The reference assumption alone does not establish absolute reflectance calibration.
+
+The code in this repository was primarily generated using GPT-6 (OpenAI), with the author providing the scientific methodology, technical requirements, and oversight.
