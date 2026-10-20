@@ -66,6 +66,9 @@ def update_sample_statistics(main_folder, sample_name, new_stats, all_samples=No
     now = pd.concat([prev, pd.DataFrame(new_stats)], ignore_index=True)
     if len(now):
         now = now.sort_values(['sample','index'], kind='stable').reset_index(drop=True)
+    elif not len(now.columns):
+        now = pd.DataFrame(columns=['sample','index','n_valid_pixels',
+            'observed_min','observed_max','p02','p98'])
     atomic_write_csv(now, path)
     return summarize_empirical_ranges(main)
 

@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from matplotlib import colors
 from pathlib import Path
 from calculate_vegetation_indices import INDEX_INFO
-from index_band_interpolation import sample_band
+from index_band_interpolation import sample_band, BandSampler
 _SIGNAL_OK = {k for k, v in INDEX_INFO.items() if v[3]} | {'REP'}
 
 def _div(a, b):
@@ -13,14 +13,11 @@ def _div(a, b):
         return np.where(np.abs(b) > 1e-12, a / b, np.nan)
 
 
-def _make_R_function(wavelengths: np.ndarray, cube: np.ndarray, interpolate=True, allow_extrapolation=False):
+def _make_R_function(wavelengths: np.ndarray, cube: np.ndarray, interpolate=True, allow_extrapolation=False, band_reader=None):
     """Return a callable R(nm) -> HxW float32 map, cached by wavelength."""
-    cache = {}
-    def R(nm):
-        if nm not in cache:
-            cache[nm] = sample_band(wavelengths, cube, nm, axis=2, interpolate=interpolate)
-        return cache[nm]
-    return R
+    if band_reader is not None:
+        return band_reader
+    return BandSampler(wavelengths, cube, axis=2, interpolate=interpolate, max_cached_bands=12)
 
 
 def compute_index_maps(wavelengths, cube, data_type='signal', interpolate=True, allow_extrapolation=False):
@@ -155,7 +152,7 @@ def save_map(
     plt.close(fig)
 
 
-def compute_single_index_map(wavelengths, cube, index, data_type='signal', interpolate=True):
+def compute_single_index_map(wavelengths, cube, index, data_type='signal', interpolate=True, *, band_reader=None):
     """Calculate ONE spectral index without holding all 37 full-size maps in RAM.
 
     Uses the same implemented expressions as compute_index_maps. This is the
@@ -168,7 +165,7 @@ def compute_single_index_map(wavelengths, cube, index, data_type='signal', inter
     if data_type == 'signal' and index not in _SIGNAL_OK:
         return np.full(cube.shape[:2], np.nan, dtype=np.float32)
 
-    R = _make_R_function(wavelengths, cube, interpolate=interpolate)
+    R = _make_R_function(wavelengths, cube, interpolate=interpolate, band_reader=band_reader)
     x = lambda n: R(n)
     nd = lambda a,b: _div(x(a)-x(b), x(a)+x(b))
     mcari = lambda: ((x(700)-x(670))-0.2*(x(700)-x(550)))*_div(x(700),x(670))
@@ -219,3 +216,67 @@ def compute_single_index_map(wavelengths, cube, index, data_type='signal', inter
             raise RuntimeError('Not implemented: ' + index)
     value = np.asarray(value, dtype=np.float32)
     return np.where(np.isfinite(value), value, np.nan)
+
+
+def save_map_fast(arr: np.ndarray, out_path: Path, title: str, cmap='viridis',
+                  *, vmin: float, vmax: float, width=1152, height=936):
+    """Render a study-consistent PNG using Pillow, without a Matplotlib figure.
+
+    The palette uses the same Matplotlib colormap and linear vmin/vmax mapping
+    as save_map(), including clipping and black pixels for missing data. A
+    legible per-image colorbar shows the actual common index bounds.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+    data = np.asarray(arr, dtype=np.float32)
+    good = np.isfinite(data)
+    if not good.any():
+        Image.new('RGB', (data.shape[1], data.shape[0]), 'white').save(out_path)
+        return
+    if not (np.isfinite(vmin) and np.isfinite(vmax) and vmin < vmax):
+        raise ValueError(f'Invalid color bounds: {vmin}, {vmax}')
+    from matplotlib import colormaps
+    palette = (colormaps.get_cmap(cmap)(np.linspace(0, 1, 256))[:, :3] * 255 + 0.5).astype(np.uint8)
+    # 256-color quantization is deliberate: it avoids costly per-pixel Matplotlib
+    # rendering and is finer than can be distinguished on most raster heatmaps.
+    with np.errstate(invalid='ignore', divide='ignore'):
+        idx = (np.clip((data - np.float32(vmin)) / np.float32(vmax - vmin), 0, 1) * 255).astype(np.uint8)
+    rgb = palette[idx]
+    rgb[~good] = (0, 0, 0)
+
+    canvas = Image.new('RGB', (width, height), 'white')
+    draw = ImageDraw.Draw(canvas)
+    try:
+        title_font = ImageFont.truetype('DejaVuSans.ttf', 25)
+        ticks_font = ImageFont.truetype('DejaVuSans.ttf', 21)
+    except OSError:
+        title_font = ImageFont.load_default()
+        ticks_font = ImageFont.load_default()
+    title = str(title)
+    draw.text((width // 2, 27), title, anchor='mt', font=title_font, fill='#202020')
+    # Similar canvas dimensions and spatial aspect ratio to the v4 PNGs.
+    left, top, maxw, maxh = 25, 75, width - 230, height - 115
+    h, w = data.shape
+    scale = min(maxw / w, maxh / h)
+    imw, imh = max(1, round(w * scale)), max(1, round(h * scale))
+    px = left + (maxw - imw) // 2
+    py = top + (maxh - imh) // 2
+    image = Image.fromarray(rgb, 'RGB')
+    # NEAREST avoids blending masked/invalid pixels into valid measurements.
+    if image.size != (imw, imh):
+        image = image.resize((imw, imh), Image.Resampling.NEAREST)
+    canvas.paste(image, (px, py))
+
+    bx1, by1, barw, barh = left + maxw + 30, top + 5, 28, maxh - 10
+    grad = np.arange(barh, dtype=np.float64)[::-1] / max(barh - 1, 1)
+    bar = palette[np.rint(grad * 255).astype(np.uint8)]
+    bar = np.tile(bar[:, np.newaxis, :], (1, barw, 1))
+    canvas.paste(Image.fromarray(bar, 'RGB'), (bx1, by1))
+    draw.rectangle((bx1, by1, bx1 + barw - 1, by1 + barh - 1), outline='#444444', width=1)
+    for fraction in (0., .25, .5, .75, 1.):
+        y = by1 + round((1 - fraction) * (barh - 1))
+        value = vmin + fraction * (vmax - vmin)
+        draw.line((bx1 + barw + 2, y, bx1 + barw + 10, y), fill='#333333', width=2)
+        draw.text((bx1 + barw + 17, y), f'{value:.4g}', anchor='lm', font=ticks_font, fill='#202020')
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(out_path, format='PNG', optimize=False)
