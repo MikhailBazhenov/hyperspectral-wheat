@@ -1,9 +1,17 @@
 """Tiled wheat segmentation with GWFSS SegFormer-B0.
 
+On the first segmentation, download the model directly to a folder beside THIS
+Python file (GWFSS_Segformer_b0/ by default). Subsequent runs load the local
+files with local_files_only=True; they never check Hugging Face for updates.
+The processor and model are also reused in memory across samples in one process.
+
 Install: pip install torch torchvision transformers pillow numpy opencv-contrib-python safetensors
 Reuses RGB-band loading/conversion from segment_wheat_gwfss.py.
 """
 from pathlib import Path
+from functools import lru_cache
+import json
+import re
 import numpy as np
 import cv2
 from PIL import Image
@@ -26,6 +34,100 @@ CLASS_COLORS_RGB = {
     2: (0, 180, 255),     # stem
     3: (0, 220, 0),       # leaf
 }
+
+
+# Model files are kept next to this .py module, independent of the notebook's
+# working directory and of where the input images are located.
+def _local_model_directory(model_id):
+    if model_id == MODEL_ID:
+        name = "GWFSS_Segformer_b0"
+    else:
+        # Keep custom model IDs separate from the default model.
+        name = "hf_" + re.sub(r"[^a-zA-Z0-9._-]+", "_", str(model_id)).strip("._")
+        if name == "hf_":
+            raise ValueError("model_id cannot be empty")
+    return Path(__file__).resolve().parent / name
+
+
+def _local_model_ready(folder):
+    """Check for the image processor, config and a complete model checkpoint."""
+    if not (folder / "config.json").is_file():
+        return False
+    if not any((folder / n).is_file()
+               for n in ("preprocessor_config.json", "image_processor_config.json")):
+        return False
+    for name in ("model.safetensors", "pytorch_model.bin"):
+        file = folder / name
+        if file.is_file() and file.stat().st_size > 0:
+            return True
+    # Also accept sharded checkpoints if every referenced shard is present.
+    for name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        index_file = folder / name
+        if not index_file.is_file():
+            continue
+        try:
+            shards = set(json.loads(index_file.read_text(encoding="utf-8"))["weight_map"].values())
+            if shards and all((folder / shard).is_file() and
+                              (folder / shard).stat().st_size > 0 for shard in shards):
+                return True
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    return False
+
+
+def _ensure_local_model(model_id):
+    """Download once into the module directory; never contact the Hub if ready.
+
+    ``snapshot_download(local_dir=...)`` saves actual files directly in this
+    directory (with small local download metadata, not a model in the global
+    Hugging Face cache). Interrupted downloads can be resumed next time.
+    """
+    folder = _local_model_directory(model_id)
+    if _local_model_ready(folder):
+        return folder
+
+    from huggingface_hub import snapshot_download
+
+    folder.mkdir(parents=True, exist_ok=True)
+    print(f"[SegFormer] Local model not found or incomplete. Downloading {model_id} to {folder}")
+    try:
+        snapshot_download(
+            repo_id=model_id,
+            local_dir=str(folder),
+            # Only Transformers checkpoint/config files; omit the repo's
+            # separate MMsegmentation .pth weights and ancillary materials.
+            allow_patterns=["*.json", "*.safetensors", "pytorch_model*.bin"],
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot download SegFormer model '{model_id}' to '{folder}'. "
+            "An internet connection is required for the first download. "
+            "Check the connection and write permissions, then rerun the cell."
+        ) from exc
+    if not _local_model_ready(folder):
+        raise RuntimeError(
+            f"The model download to '{folder}' is incomplete: config, "
+            "image-processor settings or checkpoint weights are missing."
+        )
+    print(f"[SegFormer] Model saved in: {folder}")
+    return folder
+
+
+@lru_cache(maxsize=1)
+def _load_model_from_disk(local_dir, device):
+    """Keep one initialized processor/model pair in memory during batch runs."""
+    from transformers import AutoImageProcessor, SegformerForSemanticSegmentation
+
+    processor = AutoImageProcessor.from_pretrained(local_dir, local_files_only=True)
+    model = SegformerForSemanticSegmentation.from_pretrained(
+        local_dir, local_files_only=True
+    ).to(device).eval()
+    return processor, model
+
+
+def _get_model(model_id, device):
+    folder = _ensure_local_model(model_id)
+    return _load_model_from_disk(str(folder), str(device))
 
 
 def _starts(length, tile_size, overlap):
@@ -104,12 +206,11 @@ def segment_wheat_gwfss_tiled(
       Applied to the argmax class after probability blending.
     stretch_percentiles: optional per-channel (low, high) percentile stretch
     device: 'cpu', 'cuda', or None (auto)
-    model_id: Hugging Face model identifier
+    model_id: Hugging Face model identifier. Checkpoint files are downloaded
+      once beside this module, then loaded locally without network access.
     """
     import torch
     import torch.nn.functional as F
-    from transformers import AutoImageProcessor, SegformerForSemanticSegmentation
-
     tile_size, overlap = int(tile_size), int(overlap)
     if tile_size < 32 or not 0 <= overlap < tile_size:
         raise ValueError("Require tile_size >= 32 and 0 <= overlap < tile_size")
@@ -148,8 +249,7 @@ def segment_wheat_gwfss_tiled(
 
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    processor = AutoImageProcessor.from_pretrained(model_id)
-    model = SegformerForSemanticSegmentation.from_pretrained(model_id).to(device).eval()
+    processor, model = _get_model(model_id, device)
     n_classes = model.config.num_labels
     if max(CLASS_IDS.values()) >= n_classes:
         raise RuntimeError(f"Model exposes {n_classes} classes, expected at least 4")
