@@ -18,7 +18,6 @@ The main steps are optional dark-frame subtraction, ArUco-based image alignment,
 
 ![CIgreen index maps of wheat samples](docs/images/collage_index_CIgreen.png)
 
-*The CIgreen collage above is from an earlier run with separate color ranges for each sample. The current pipeline uses a common range for every sample within an experiment; regenerate the maps with the notebook's final cell before comparing their colors quantitatively.*
 
 ## Requirements
 
@@ -90,4 +89,5 @@ Results are saved inside each experiment, including:
 
 **Calibration note.** Spectralon reflectance is assumed to be 1 at each wavelength. The resulting data represent *relative reflectance*, and their accuracy depends on consistent imaging conditions and suitable reference measurements. The reference assumption alone does not establish absolute reflectance calibration.
 
+## Usage of AI
 The code in this repository was primarily generated using GPT-6 (OpenAI), with the author providing the scientific methodology, technical requirements, and oversight.
