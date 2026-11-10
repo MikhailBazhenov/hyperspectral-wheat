@@ -20,6 +20,7 @@ import pandas as pd
 import cv2
 
 from calculate_vegetation_indices import INDEX_INFO
+from index_presets import resolve_indices, FORMULA_FINGERPRINT, OBSOLETE_INDEX_NAMES
 from index_band_interpolation import BandSampler
 from spectral_cube_reflectance import load_quant_cube
 from vegetation_index_formulas import compute_single_index_map, save_map, save_map_fast
@@ -29,8 +30,8 @@ from index_color_scales import (
     select_color_bounds, index_statistics, atomic_write_csv,
 )
 
-_STATS_SCHEMA = 2
-_STATS_METADATA = ('stats_schema','cube_mtime_ns','cube_size_bytes',
+_STATS_SCHEMA = 3
+_STATS_METADATA = ('stats_schema','formula_fingerprint','cube_mtime_ns','cube_size_bytes',
                    'mask_mtime_ns','mask_size_bytes','use_mask','mask_filename','data_type')
 
 
@@ -56,7 +57,7 @@ def _source_meta(folder, mask_filename, use_mask, data_type):
         mask_ns, mask_size = mstat.st_mtime_ns, mstat.st_size
     else:
         mask_ns, mask_size = 0, 0
-    return dict(stats_schema=_STATS_SCHEMA, cube_mtime_ns=cstat.st_mtime_ns,
+    return dict(stats_schema=_STATS_SCHEMA,formula_fingerprint=FORMULA_FINGERPRINT, cube_mtime_ns=cstat.st_mtime_ns,
                 cube_size_bytes=cstat.st_size, mask_mtime_ns=mask_ns,
                 mask_size_bytes=mask_size, use_mask=int(use_mask),
                 mask_filename=str(mask_filename), data_type=str(data_type))
@@ -72,7 +73,7 @@ def _stats_current(old_stats, sample_name, names, metadata):
     if len(subset) != len(names):
         return False
     for col in _STATS_METADATA:
-        if col in ('data_type', 'mask_filename'):
+        if col in ('data_type', 'mask_filename','formula_fingerprint'):
             if not subset[col].astype(str).eq(str(metadata[col])).all():
                 return False
         else:
@@ -142,7 +143,8 @@ def _old_map_valid(old, dest, cube_path, mask_path, use_mask, missing, n_valid,
         return False
     try:
         expected = 'unavailable' if missing else 'no_valid_pixels' if not n_valid else 'ok'
-        return (str(old['status']) == expected and
+        return (str(old.get('formula_fingerprint', '')) == FORMULA_FINGERPRINT and
+                str(old['status']) == expected and
                 str(old['scale_source']) == source and
                 str(old['renderer']) == renderer and str(old['cmap']) == cmap and
                 np.isclose(float(old['vmin']), lo, rtol=1e-10, atol=1e-10) and
@@ -166,7 +168,7 @@ def _write_one_map(arr, dest, title, missing, n_valid, cmap, renderer,
 
 
 def create_vegetation_index_maps(
-    main_folder, *, indices=None,
+    main_folder, *, indices=None, index_preset='medium',
     output_subfolder='index_maps', mask_filename='wheat_mask.png', use_mask=True,
     calibration_marker='calibration_target', spectralon_marker='spectralon',
     flat_marker='flat', dark_marker='dark', exclude_marker='#',
@@ -185,7 +187,7 @@ def create_vegetation_index_maps(
     main = Path(main_folder).expanduser().resolve()
     if not main.is_dir():
         raise NotADirectoryError(main)
-    names = list(INDEX_INFO) if indices is None else list(dict.fromkeys(indices))
+    names = resolve_indices(index_preset, indices)
     if any(n not in INDEX_INFO for n in names):
         raise ValueError('Unknown index requested')
     if scale_source not in ('draft', 'empirical'):
@@ -328,7 +330,7 @@ def create_vegetation_index_maps(
                     _write_one_map(arr,dest,f'{folder.parent.name} — {name}',missing,n_valid,
                                    cmap,renderer,robust_percentiles,lo,hi)
                     render_s += perf_counter()-tic
-                rows.append(dict(sample=sample_name,index=name,output_png=str(dest),
+                rows.append(dict(sample=sample_name,index=name,formula_fingerprint=FORMULA_FINGERPRINT,output_png=str(dest),
                                  n_valid_pixels=n_valid,interpolated=bool(interpolated),
                                  missing_wavelengths_nm=','.join(str(nm) for nm in missing),
                                  status=('unavailable' if missing else 'no_valid_pixels' if not n_valid else 'ok'),
@@ -344,7 +346,7 @@ def create_vegetation_index_maps(
             # Remove any partial report rows created before the error.
             rows = [r for r in rows if r['sample'] != sample_name]
             for name in names:
-                rows.append(dict(sample=sample_name,index=name,output_png='',n_valid_pixels=0,
+                rows.append(dict(sample=sample_name,index=name,formula_fingerprint=FORMULA_FINGERPRINT,output_png='',n_valid_pixels=0,
                                  interpolated=False,missing_wavelengths_nm='',status='error',
                                  error=f'{type(exc).__name__}: {exc}',vmin=np.nan,vmax=np.nan,
                                  scale_source='',renderer=renderer,cmap=cmap))
@@ -358,6 +360,14 @@ def create_vegetation_index_maps(
     if scale_source == 'draft':
         summarize_empirical_ranges(main)
     report = pd.DataFrame(rows)
+    # Remove only obsolete generated index PNGs (including names from the
+    # historical 47-index catalogue), leaving arbitrary user files intact.
+    obsolete = set(OBSOLETE_INDEX_NAMES) | (set(INDEX_INFO) - set(names))
+    for _, folder in folders:
+        for label in obsolete:
+            path = folder.parent / output_subfolder / (label + '.png')
+            if path.is_file():
+                path.unlink()
     atomic_write_csv(report, previous_report_path)
     atomic_write_csv(pd.DataFrame(time_rows), main/'index_processing_timing.csv')
     return report

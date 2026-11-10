@@ -1,0 +1,20 @@
+﻿index_or_legacy_variant,decision,scientific_reason
+NDVI_670,removed,Use NDVI 800/680; 670 nm is a close red-band variant.
+PRI570_530,removed,Use PRI 531/570 with linear interpolation.
+SR,removed,Exact monotonic transform of NDVI for identical bands.
+SR705,removed,Red-edge ratio with near-identical meaning to NDVI705/CIrededge.
+ARI1,removed,"Use ARI2, which incorporates NIR normalization of the same anthocyanin contrast."
+MSR705,removed,Exact transform of mND705 for the same 750/705/445 bands.
+NRI,removed,Non-specific red/green contrast; avoid interpreting as direct nitrogen measure.
+CARI_legacy,removed,R720/R510-1 is not published standard CARI; redundant pigment contrast.
+GM1,removed,NIR/green chlorophyll response already covered by CIgreen and GNDVI.
+NPQI_420_440,replaced by NPQI,Published 415/435 nm formulation; interpolate instead of nearest band.
+SRPI,removed,Exact monotonic transform of NPCI with same 430/680 bands.
+VREI2,removed,Legacy nonstandard band variation; MTCI and VOG1 retain red-edge shape information.
+CIrededge_840_720,removed,Retain CIrededge 790/710 as the single chlorophyll red-edge ratio.
+RENDVI_750_710,removed,Close spectral variant of NDVI705 750/705; keep established 705-nm version.
+SIPI_450,removed,Keep published SIPI 445-nm version; interpolate.
+WBI_970_900,merged into WBI,Use one R970/R900 series per Peñuelas et al. 1993; prior WBI was reciprocal.
+NPCI,retained,"Distinct normalized pigment contrast, originally in legacy code."
+NPQI,added,Published phaeophytinization index 415/435 rather than legacy 420/440.
+MTCI,updated,Use literature band centers 754/709/681 rather than 750/710/680.

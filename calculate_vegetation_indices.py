@@ -17,30 +17,23 @@ from index_band_interpolation import band_status, sample_band
 # name: (description, formula, required wavelength centers (nm), scale-invariant)
 INDEX_INFO = {
     'NDVI': ('Normalized Difference Vegetation Index', '(R800-R680)/(R800+R680)', (800,680), True),
-    'NDVI_670': ('NDVI 800/670 variant', '(R800-R670)/(R800+R670)', (800,670), True),
     'GNDVI': ('Green Normalized Difference Vegetation Index', '(R800-R550)/(R800+R550)', (800,550), True),
     'NDRE': ('Normalized Difference Red Edge', '(R790-R720)/(R790+R720)', (790,720), True),
     'NDVI705': ('Red-edge normalized difference', '(R750-R705)/(R750+R705)', (750,705), True),
     'CIgreen': ('Green Chlorophyll Index', 'R790/R550-1', (790,550), True),
     'CIrededge': ('Red-edge Chlorophyll Index', 'R790/R710-1', (790,710), True),
-    'SR': ('Simple Ratio (NIR/red)', 'R800/R680', (800,680), True),
-    'SR705': ('Simple Ratio red-edge', 'R750/R710', (750,710), True),
     'VOG1': ('Vogelmann Red-edge Index 1', 'R740/R720', (740,720), True),
-    'MTCI': ('MERIS Terrestrial Chlorophyll Index (750/710/680 variant)', '(R750-R710)/(R710-R680)', (750,710,680), True),
+    'MTCI': ('MERIS Terrestrial Chlorophyll Index (original bands)', '(R754-R709)/(R709-R681)', (754,709,681), True),
     'PRI': ('Photochemical Reflectance Index', '(R531-R570)/(R531+R570)', (531,570), True),
-    'PRI570_530': ('PRI on 10-nm grid, approximate 530 for 531', '(R530-R570)/(R530+R570)', (530,570), True),
     'PSRI': ('Plant Senescence Reflectance Index', '(R680-R500)/R750', (680,500,750), True),
     'SIPI': ('Structure Insensitive Pigment Index', '(R800-R445)/(R800-R680)', (800,445,680), True),
-    'ARI1': ('Anthocyanin Reflectance Index 1', '1/R550-1/R700', (550,700), False),
     'ARI2': ('Anthocyanin Reflectance Index 2', 'R800*(1/R550-1/R700)', (550,700,800), True),
     'CRI1': ('Carotenoid Reflectance Index 1', '1/R510-1/R550', (510,550), False),
     'CRI2': ('Carotenoid Reflectance Index 2', '1/R510-1/R700', (510,700), False),
-    'WBI': ('Water Band Index', 'R900/R970', (900,970), True),
-    'NRI': ('Nitrogen Reflectance Index (570,670)', '(R570-R670)/(R570+R670)', (570,670), True),
+    'WBI': ('Plant Water Index (Peñuelas et al. 1993 convention)', 'R970/R900', (970,900), True),
     'RGI': ('Red-Green Index', 'R690/R550', (690,550), True),
     'R750_R700': ('Red-edge chlorophyll ratio', 'R750/R700', (750,700), True),
     'mND705': ('Modified ND705', '(R750-R705)/(R750+R705-2*R445)', (750,705,445), True),
-    'MSR705': ('Modified simple ratio 705', '(R750-R445)/(R705-R445)', (750,445,705), True),
     'REP': ('Red Edge Position, linear four-band estimate (nm)', '700+40*((R670+R780)/2-R700)/(R740-R700)', (670,780,700,740), False),
     'MCARI': ('Modified Chlorophyll Absorption Ratio Index', '((R700-R670)-0.2*(R700-R550))*(R700/R670)', (700,670,550), False),
     'TCARI': ('Transformed Chlorophyll Absorption Ratio Index', '3*((R700-R670)-0.2*(R700-R550)*(R700/R670))', (700,670,550), False),
@@ -53,6 +46,8 @@ INDEX_INFO = {
     'MSAVI': ('Modified Soil Adjusted Vegetation Index', '(2*R800+1-sqrt((2*R800+1)^2-8*(R800-R670)))/2', (800,670), False),
     'MCARI_OSAVI': ('MCARI divided by OSAVI', 'MCARI/OSAVI', (700,670,550,800), False),
     'TCARI_OSAVI': ('TCARI divided by OSAVI', 'TCARI/OSAVI', (700,670,550,800), False),
+    'NPCI': ('Normalized Pigment Chlorophyll Index', '(R680-R430)/(R680+R430)', (680,430), True),
+    'NPQI': ('Normalized Phaeophytinization Index (published band centers)', '(R415-R435)/(R415+R435)', (415,435), True),
 }
 
 
@@ -87,6 +82,8 @@ def calculate_vegetation_indices(
     data_type='signal',
     interpolate=True,
     allow_extrapolation=False,
+    indices=None,
+    index_preset='medium',
 ):
     """Calculate vegetation indices for all samples in spectra CSV.
 
@@ -113,6 +110,11 @@ def calculate_vegetation_indices(
     allow_extrapolation : bool
         For safety defaults to False; requested wavelengths beyond observed
         range yield NaN.
+    index_preset : {'minimal', 'medium', 'maximum'}
+        Default medium; controls which index values and interpolation flags
+        are included in the output table.
+    indices : sequence[str] or None
+        Exact custom subset, overriding index_preset.
 
     Returns
     -------
@@ -154,27 +156,27 @@ def calculate_vegetation_indices(
         osavi = _div(1.16*(x(800)-x(670)), x(800)+x(670)+0.16)
         radicand = (2*x(800)+1)**2-8*(x(800)-x(670))
         values = {
-            'NDVI': nd(800,680), 'NDVI_670': nd(800,670),
-            'GNDVI': nd(800,550), 'NDRE': nd(790,720), 'NDVI705': nd(750,705),
+            'NDVI': nd(800,680),
+            'GNDVI': nd(800,550),
+            'NDRE': nd(790,720),
+            'NDVI705': nd(750,705),
             'CIgreen': _div(x(790),x(550))-1,
             'CIrededge': _div(x(790),x(710))-1,
-            'SR': _div(x(800),x(680)), 'SR705': _div(x(750),x(710)),
             'VOG1': _div(x(740),x(720)),
-            'MTCI': _div(x(750)-x(710),x(710)-x(680)),
-            'PRI': nd(531,570), 'PRI570_530': nd(530,570),
+            'MTCI': _div(x(754)-x(709),x(709)-x(681)),
+            'PRI': nd(531,570),
             'PSRI': _div(x(680)-x(500),x(750)),
             'SIPI': _div(x(800)-x(445),x(800)-x(680)),
-            'ARI1': _div(1,x(550))-_div(1,x(700)),
             'ARI2': x(800)*(_div(1,x(550))-_div(1,x(700))),
             'CRI1': _div(1,x(510))-_div(1,x(550)),
             'CRI2': _div(1,x(510))-_div(1,x(700)),
-            'WBI': _div(x(900),x(970)),
-            'NRI': nd(570,670), 'RGI': _div(x(690),x(550)),
+            'WBI': _div(x(970),x(900)),
+            'RGI': _div(x(690),x(550)),
             'R750_R700': _div(x(750),x(700)),
-            'mND705': _div(x(750)-x(705), x(750)+x(705)-2*x(445)),
-            'MSR705': _div(x(750)-x(445),x(705)-x(445)),
+            'mND705': _div(x(750)-x(705),x(750)+x(705)-2*x(445)),
             'REP': 700+40*_div((x(670)+x(780))/2-x(700),x(740)-x(700)),
-            'MCARI': mcari, 'TCARI': tcari,
+            'MCARI': mcari,
+            'TCARI': tcari,
             'TVI': 0.5*(120*(x(750)-x(550))-200*(x(670)-x(550))),
             'DVI': x(800)-x(680),
             'RDVI': _div(x(800)-x(670),np.sqrt(np.maximum(x(800)+x(670),0))),
@@ -184,10 +186,12 @@ def calculate_vegetation_indices(
             'MSAVI': (2*x(800)+1-np.sqrt(np.where(radicand>=0,radicand,np.nan)))/2,
             'MCARI_OSAVI': _div(mcari,osavi),
             'TCARI_OSAVI': _div(tcari,osavi),
+            'NPCI': nd(680,430),
+            'NPQI': nd(415,435),
         }
 
     # REP (a wavelength, nm) and ARI2 remain invariant under multiplicative
-    # scaling, whereas ARI1 and CRI1/2 do not.
+    # scaling, whereas CRI1/2 do not.
     signal_ok = set(k for k, v in INDEX_INFO.items() if v[3]) | {'REP'}
     if data_type == 'signal':
         for name in values:
@@ -210,6 +214,14 @@ def calculate_vegetation_indices(
     for name in INDEX_INFO:
         columns[name] = values[name]
         columns[name + '_interpolated'] = flags[name + '_interpolated']
+    # Preset selection applies to both numerical values and interpolation flags.
+    # Import inside the function to avoid a circular module import: presets
+    # obtain their authoritative index catalogue from this file.
+    from index_presets import resolve_indices
+    chosen = resolve_indices(index_preset, indices)
+    columns = {'sample': columns['sample'], **{
+        key: columns[key] for name in chosen
+        for key in (name, name + '_interpolated')}}
     result = pd.DataFrame(columns)
 
     if output_csv is not None:
@@ -233,7 +245,7 @@ def calculate_vegetation_indices(
              'interpolated_wavelengths_nm': ','.join(str(t) for t in status_by_name[name][1]),
              'missing_wavelengths_nm': ','.join(str(t) for t in status_by_name[name][2]),
              'wavelength_status': status_by_name[name][0]}
-            for name, entry in INDEX_INFO.items()
+            for name, entry in INDEX_INFO.items() if name in chosen
         ])
         out = Path(metadata_csv)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -248,5 +260,7 @@ if __name__ == '__main__':
     parser.add_argument('--output', default='vegetation_indices.csv')
     parser.add_argument('--metadata', default='vegetation_indices_descriptions.csv')
     parser.add_argument('--data-type', choices=['signal', 'signal_exploratory', 'reflectance'], default='signal')
+    parser.add_argument('--index-preset', choices=['minimal','medium','maximum'], default='medium')
+    parser.add_argument('--indices', nargs='+', default=None, help='Optional index list instead of a preset')
     args = parser.parse_args()
-    print(calculate_vegetation_indices(args.spectra_csv,args.output,args.metadata,args.data_type).head())
+    print(calculate_vegetation_indices(args.spectra_csv,args.output,args.metadata,args.data_type,indices=args.indices,index_preset=args.index_preset).head())

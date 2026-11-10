@@ -47,43 +47,38 @@ def compute_index_maps(wavelengths, cube, data_type='signal', interpolate=True, 
         osavi = _div(1.16 * (x(800) - x(670)), x(800) + x(670) + 0.16)
         radicand = (2 * x(800) + 1) ** 2 - 8 * (x(800) - x(670))
         values = {
-            'NDVI': nd(800, 680),
-            'NDVI_670': nd(800, 670),
-            'GNDVI': nd(800, 550),
-            'NDRE': nd(790, 720),
-            'NDVI705': nd(750, 705),
-            'CIgreen': _div(x(790), x(550)) - 1,
-            'CIrededge': _div(x(790), x(710)) - 1,
-            'SR': _div(x(800), x(680)),
-            'SR705': _div(x(750), x(710)),
-            'VOG1': _div(x(740), x(720)),
-            'MTCI': _div(x(750) - x(710), x(710) - x(680)),
-            'PRI': nd(531, 570),
-            'PRI570_530': nd(530, 570),
-            'PSRI': _div(x(680) - x(500), x(750)),
-            'SIPI': _div(x(800) - x(445), x(800) - x(680)),
-            'ARI1': _div(1, x(550)) - _div(1, x(700)),
-            'ARI2': x(800) * (_div(1, x(550)) - _div(1, x(700))),
-            'CRI1': _div(1, x(510)) - _div(1, x(550)),
-            'CRI2': _div(1, x(510)) - _div(1, x(700)),
-            'WBI': _div(x(900), x(970)),
-            'NRI': nd(570, 670),
-            'RGI': _div(x(690), x(550)),
-            'R750_R700': _div(x(750), x(700)),
-            'mND705': _div(x(750) - x(705), x(750) + x(705) - 2 * x(445)),
-            'MSR705': _div(x(750) - x(445), x(705) - x(445)),
-            'REP': 700 + 40 * _div((x(670) + x(780)) / 2 - x(700), x(740) - x(700)),
+            'NDVI': nd(800,680),
+            'GNDVI': nd(800,550),
+            'NDRE': nd(790,720),
+            'NDVI705': nd(750,705),
+            'CIgreen': _div(x(790),x(550))-1,
+            'CIrededge': _div(x(790),x(710))-1,
+            'VOG1': _div(x(740),x(720)),
+            'MTCI': _div(x(754)-x(709),x(709)-x(681)),
+            'PRI': nd(531,570),
+            'PSRI': _div(x(680)-x(500),x(750)),
+            'SIPI': _div(x(800)-x(445),x(800)-x(680)),
+            'ARI2': x(800)*(_div(1,x(550))-_div(1,x(700))),
+            'CRI1': _div(1,x(510))-_div(1,x(550)),
+            'CRI2': _div(1,x(510))-_div(1,x(700)),
+            'WBI': _div(x(970),x(900)),
+            'RGI': _div(x(690),x(550)),
+            'R750_R700': _div(x(750),x(700)),
+            'mND705': _div(x(750)-x(705),x(750)+x(705)-2*x(445)),
+            'REP': 700+40*_div((x(670)+x(780))/2-x(700),x(740)-x(700)),
             'MCARI': mcari,
             'TCARI': tcari,
-            'TVI': 0.5 * (120 * (x(750) - x(550)) - 200 * (x(670) - x(550))),
-            'DVI': x(800) - x(680),
-            'RDVI': _div(x(800) - x(670), np.sqrt(np.maximum(x(800) + x(670), 0))),
+            'TVI': 0.5*(120*(x(750)-x(550))-200*(x(670)-x(550))),
+            'DVI': x(800)-x(680),
+            'RDVI': _div(x(800)-x(670),np.sqrt(np.maximum(x(800)+x(670),0))),
             'OSAVI': osavi,
-            'SAVI': _div(1.5 * (x(800) - x(680)), x(800) + x(680) + 0.5),
-            'EVI': _div(2.5 * (x(800) - x(680)), x(800) + 6 * x(680) - 7.5 * x(450) + 1),
-            'MSAVI': (2 * x(800) + 1 - np.sqrt(np.where(radicand >= 0, radicand, np.nan))) / 2,
-            'MCARI_OSAVI': _div(mcari, osavi),
-            'TCARI_OSAVI': _div(tcari, osavi),
+            'SAVI': _div(1.5*(x(800)-x(680)),x(800)+x(680)+0.5),
+            'EVI': _div(2.5*(x(800)-x(680)),x(800)+6*x(680)-7.5*x(450)+1),
+            'MSAVI': (2*x(800)+1-np.sqrt(np.where(radicand>=0,radicand,np.nan)))/2,
+            'MCARI_OSAVI': _div(mcari,osavi),
+            'TCARI_OSAVI': _div(tcari,osavi),
+            'NPCI': nd(680,430),
+            'NPQI': nd(415,435),
         }
 
     if data_type == 'signal':
@@ -153,7 +148,7 @@ def save_map(
 
 
 def compute_single_index_map(wavelengths, cube, index, data_type='signal', interpolate=True, *, band_reader=None):
-    """Calculate ONE spectral index without holding all 37 full-size maps in RAM.
+    """Calculate ONE spectral index without holding all selected full-size maps in RAM.
 
     Uses the same implemented expressions as compute_index_maps. This is the
     preferred API for batch map creation on large hyperspectral cubes.
@@ -174,30 +169,23 @@ def compute_single_index_map(wavelengths, cube, index, data_type='signal', inter
 
     with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
         if index == 'NDVI': value = nd(800,680)
-        elif index == 'NDVI_670': value = nd(800,670)
         elif index == 'GNDVI': value = nd(800,550)
         elif index == 'NDRE': value = nd(790,720)
         elif index == 'NDVI705': value = nd(750,705)
         elif index == 'CIgreen': value = _div(x(790),x(550))-1
         elif index == 'CIrededge': value = _div(x(790),x(710))-1
-        elif index == 'SR': value = _div(x(800),x(680))
-        elif index == 'SR705': value = _div(x(750),x(710))
         elif index == 'VOG1': value = _div(x(740),x(720))
-        elif index == 'MTCI': value = _div(x(750)-x(710),x(710)-x(680))
+        elif index == 'MTCI': value = _div(x(754)-x(709),x(709)-x(681))
         elif index == 'PRI': value = nd(531,570)
-        elif index == 'PRI570_530': value = nd(530,570)
         elif index == 'PSRI': value = _div(x(680)-x(500),x(750))
         elif index == 'SIPI': value = _div(x(800)-x(445),x(800)-x(680))
-        elif index == 'ARI1': value = _div(1,x(550))-_div(1,x(700))
         elif index == 'ARI2': value = x(800)*(_div(1,x(550))-_div(1,x(700)))
         elif index == 'CRI1': value = _div(1,x(510))-_div(1,x(550))
         elif index == 'CRI2': value = _div(1,x(510))-_div(1,x(700))
-        elif index == 'WBI': value = _div(x(900),x(970))
-        elif index == 'NRI': value = nd(570,670)
+        elif index == 'WBI': value = _div(x(970),x(900))
         elif index == 'RGI': value = _div(x(690),x(550))
         elif index == 'R750_R700': value = _div(x(750),x(700))
         elif index == 'mND705': value = _div(x(750)-x(705),x(750)+x(705)-2*x(445))
-        elif index == 'MSR705': value = _div(x(750)-x(445),x(705)-x(445))
         elif index == 'REP': value = 700+40*_div((x(670)+x(780))/2-x(700),x(740)-x(700))
         elif index == 'MCARI': value = mcari()
         elif index == 'TCARI': value = tcari()
@@ -210,8 +198,10 @@ def compute_single_index_map(wavelengths, cube, index, data_type='signal', inter
         elif index == 'MSAVI':
             radicand = (2*x(800)+1)**2-8*(x(800)-x(670))
             value = (2*x(800)+1-np.sqrt(np.where(radicand>=0,radicand,np.nan)))/2
-        elif index == 'MCARI_OSAVI': value = _div(mcari(), osavi())
-        elif index == 'TCARI_OSAVI': value = _div(tcari(), osavi())
+        elif index == 'MCARI_OSAVI': value = _div(mcari(),osavi())
+        elif index == 'TCARI_OSAVI': value = _div(tcari(),osavi())
+        elif index == 'NPCI': value = nd(680,430)
+        elif index == 'NPQI': value = nd(415,435)
         else:
             raise RuntimeError('Not implemented: ' + index)
     value = np.asarray(value, dtype=np.float32)

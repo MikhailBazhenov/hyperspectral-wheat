@@ -55,6 +55,7 @@ def generate_reflectance_cube(
     flat_is_spectralon=False, spatial_correction=True, spectral_correction=True,
     min_flat_fraction=0.01, save_float_cube=True, cube_dtype='float16',
     preview_percentiles=(1, 99), preview_format=None, jpeg_quality=None,
+    iris_correction_factor=1.0, iris_calibration_signature=None, iris_correction_enabled=False,
 ):
     if preview_format is None:
         preview_format = DEFAULT_PREVIEW_FORMAT
@@ -79,6 +80,12 @@ def generate_reflectance_cube(
         raise ValueError('flat_is_spectralon needs flat_folder and spatial_correction=True')
     if cube_dtype not in ('float16','float32'):
         raise ValueError('cube_dtype must be float16 or float32')
+    iris_correction_factor = float(iris_correction_factor)
+    if not np.isfinite(iris_correction_factor) or iris_correction_factor <= 0:
+        raise ValueError('iris_correction_factor must be finite and positive')
+    iris_correction_enabled = bool(iris_correction_enabled)
+    if not iris_correction_enabled and iris_correction_factor != 1.0:
+        raise ValueError('Cannot apply a nonunit iris factor when iris_correction_enabled=False')
     S = None
     if spectral_correction and not flat_is_spectralon:
         df = pd.read_csv(spectralon_csv)
@@ -120,6 +127,10 @@ def generate_reflectance_cube(
             if wl not in S or not np.isfinite(S[wl]) or S[wl] <= 0:
                 raise ValueError(f'No positive Spectralon signal for {wl} nm')
             C = C / float(S[wl])
+        # Apply the exposure correction exactly once, AFTER flat/Spectralon
+        # normalization and BEFORE float16 quantization and preview scaling.
+        if iris_correction_enabled:
+            C *= iris_correction_factor
         C[~valid] = np.nan
         arrays.append(C)
         masks.append(valid & np.isfinite(C))
@@ -133,7 +144,8 @@ def generate_reflectance_cube(
     if save_float_cube:
         path = output/'corrected_cube.npz'
         np.savez_compressed(path, cube=cube.astype(cube_dtype), wavelengths=wavelengths,
-                            valid_mask=valid_mask, data_type=np.array(data_type))
+                            valid_mask=valid_mask, data_type=np.array(data_type),
+                            iris_correction_factor=np.array(iris_correction_factor, dtype=np.float32))
     # Display-only images: use one global non-linear-free scaling with percentiles;
     # independent band scaling is intentionally avoided.
     finite = cube[np.isfinite(cube)]
@@ -162,5 +174,8 @@ def generate_reflectance_cube(
         'spatial_correction':spatial_correction,'spectral_correction':spectral_correction,
         'preview_percentiles':list(preview_percentiles),
         'preview_format':preview_format,'jpeg_quality':jpeg_quality if preview_format == 'jpg' else None,
+        'iris_correction_enabled': iris_correction_enabled,
+        'iris_correction_factor': iris_correction_factor,
+        'iris_calibration_signature': iris_calibration_signature if iris_correction_enabled else None,
         'note':'Spectralon reference set to 1; not certified absolute reflectance.'},indent=2),encoding='utf-8')
     return output, diag

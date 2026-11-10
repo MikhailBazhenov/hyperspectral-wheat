@@ -14,6 +14,8 @@ Folders with markers calibration_target, spectralon, flat, dark are never
 samples; folders whose relative path contains '#' are ignored entirely.
 """
 from pathlib import Path
+import json
+import math
 import pandas as pd
 import matplotlib.pyplot as plt
 import logging
@@ -21,9 +23,14 @@ import traceback
 from datetime import datetime
 
 from correct_flat_field import _index_images
-from dark_correct_images import dark_correct_images
+from dark_correct_images import (
+    dark_correct_images, dark_correction_ready, average_dark_folders,
+)
 from spectral_cube_reflectance import generate_reflectance_cube
 from measure_plant_spectrum import measure_plant_spectrum
+from iris_aperture_calibration import (
+    calculate_iris_correction, is_iris_reference_folder, REPORT_NAME as IRIS_REPORT_NAME,
+)
 
 
 SPECTRUM_CACHE_NAME = 'plant_spectrum.csv'
@@ -48,18 +55,60 @@ def _same_bandset(folder_a, folder_b):
     return bool(a) and a == b
 
 
-def _output_ready(folder, source_folder):
-    return Path(folder).is_dir() and _same_bandset(folder, source_folder)
+def _source_is_newer(target, source_folder):
+    """Check a derived file against all bands of its upstream image set."""
+    target = Path(target)
+    if not target.is_file():
+        return True
+    cutoff = target.stat().st_mtime_ns
+    return any(p.stat().st_mtime_ns > cutoff for p in _index_images(source_folder).values())
 
 
-def _corrected_ready(corrected_folder, source_folder):
+def _output_ready(folder, source_folder, dependencies=()):
+    """Avoid reusing aligned images after correction/method changes."""
+    folder = Path(folder)
+    if not folder.is_dir() or not _same_bandset(folder, source_folder):
+        return False
+    # Source path matters: RAW -> DARK_CORRECTED -> RAW must not reuse stale alignment.
+    origin = folder / 'pipeline_alignment_source.txt'
+    if not origin.is_file() or origin.read_text(encoding='utf-8') != str(Path(source_folder).resolve()):
+        return False
+    sources = _index_images(source_folder)
+    outputs = _index_images(folder)
+    if any(outputs[wl].stat().st_mtime_ns < p.stat().st_mtime_ns for wl, p in sources.items()):
+        return False
+    if dependencies:
+        earliest_output_ns = min(p.stat().st_mtime_ns for p in outputs.values())
+        if any(Path(dep).stat().st_mtime_ns > earliest_output_ns for dep in dependencies):
+            return False
+    return True
+
+
+def _corrected_ready(corrected_folder, source_folder, dependencies=(), *,
+                     iris_enabled=False, iris_factor=1.0, iris_signature=None):
     """Ensure saved cube is readable, has the required bands and preview files."""
     from spectral_cube_reflectance import load_quant_cube
     corrected_folder = Path(corrected_folder)
     cube_path = corrected_folder / 'corrected_cube.npz'
     if not cube_path.is_file() or not _same_bandset(corrected_folder, source_folder):
         return False
+    origin = corrected_folder / 'pipeline_cube_source.txt'
+    if not origin.is_file() or origin.read_text(encoding='utf-8') != str(Path(source_folder).resolve()):
+        return False
+    if _source_is_newer(cube_path, source_folder):
+        return False
+    if any(Path(dep).stat().st_mtime_ns > cube_path.stat().st_mtime_ns for dep in dependencies):
+        return False
     try:
+        meta_path = corrected_folder / 'radiometry_metadata.json'
+        meta = json.loads(meta_path.read_text(encoding='utf-8'))
+        if bool(meta.get('iris_correction_enabled', False)) != bool(iris_enabled):
+            return False
+        if not math.isclose(float(meta.get('iris_correction_factor', 1.0)), float(iris_factor),
+                            rel_tol=1e-8, abs_tol=1e-10):
+            return False
+        if iris_enabled and meta.get('iris_calibration_signature') != iris_signature:
+            return False
         cube, wls, valid, _ = load_quant_cube(cube_path)
         return (cube.ndim == 3 and cube.shape == valid.shape and
                 list(map(int, wls)) == sorted(_index_images(source_folder)))
@@ -80,6 +129,11 @@ def process_wheat_study(
     use_dark_correction=True, use_alignment=True,
     use_spatial_correction=True, use_spectral_correction=True,
     flat_is_spectralon=False,
+    dark_subtraction_mode='pixelwise',
+    use_iris_correction=True, iris_open_marker='open_iris',
+    iris_closed_marker='closed_iris',
+    iris_stability_cv_warning=0.10,
+    iris_valid_dn_range=(10, 245), iris_wavelength_range=(500, 700),
     calibration_marker='calibration_target', spectralon_marker='spectralon',
     flat_marker='flat', dark_marker='dark', exclude_marker='#',
     reference_wavelength=700, spectralon_wavelength=400,
@@ -88,7 +142,7 @@ def process_wheat_study(
     classes=('leaf',), class_thresholds=None, tile_size=2048, overlap=512,
     save_float_cube=True, cube_dtype='float16',
     preview_percentiles=(1, 99), reuse_existing=False, overwrite_existing=False,
-    continue_on_error=True, show_plot=True,
+    continue_on_error=True, show_plot=True, stop_after_cubes=False,
 ):
     """Process all sample cubes in a study folder.
 
@@ -106,6 +160,8 @@ def process_wheat_study(
         raise NotADirectoryError(main)
     if not save_float_cube:
         raise ValueError('save_float_cube must be True: downstream spectra and index maps use the NPZ cube')
+    if dark_subtraction_mode not in ('pixelwise', 'scalar'):
+        raise ValueError("dark_subtraction_mode must be 'pixelwise' or 'scalar'")
 
     logger = logging.getLogger('wheat_pipeline.' + main.name)
     logger.setLevel(logging.INFO)
@@ -132,19 +188,51 @@ def process_wheat_study(
     if not cubes:
         raise ValueError('No Spectral_Cube folders found')
 
-    cal = _find_one(cubes, calibration_marker, use_alignment)
-    spec = _find_one(cubes, spectralon_marker, False)
-    flat = _find_one(cubes, flat_marker, use_spatial_correction)
-    dark = _find_one(cubes, dark_marker, use_dark_correction)
+    # Iris calibration series are not biological samples and must NOT be used
+    # as ordinary flat/Spectralon/ArUco references, even if nested under such names.
+    pipeline_cubes = [p for p in cubes if not is_iris_reference_folder(
+        p, main, open_marker=iris_open_marker, closed_marker=iris_closed_marker)]
+    cal = _find_one(pipeline_cubes, calibration_marker, use_alignment)
+    spec = _find_one(pipeline_cubes, spectralon_marker, False)
+    flat = _find_one(pipeline_cubes, flat_marker, use_spatial_correction)
+    dark_folders = [p for p in pipeline_cubes if dark_marker.casefold() in p.parent.name.casefold()]
+    dark = None
+    if use_dark_correction:
+        if not dark_folders:
+            print(f"WARNING [{main.name}]: no dark folders (marker={dark_marker!r}); "
+                  "continuing WITHOUT dark subtraction.", flush=True)
+            logger.warning('No dark series: proceeding without dark correction')
+        elif len(dark_folders) == 1:
+            dark = dark_folders[0]
+            print(f"Dark correction: using single source {dark.parent.name} "
+                  f"(mode={dark_subtraction_mode})", flush=True)
+        else:
+            dark, average_info = average_dark_folders(
+                dark_folders, main / 'dark_average', overwrite=not reuse_existing)
+            print(f"Dark correction: {len(dark_folders)} folders -> "
+                  f"{dark} (mode={dark_subtraction_mode})", flush=True)
 
     if flat_is_spectralon and not use_spatial_correction:
         raise ValueError('flat_is_spectralon requires spatial correction')
     if use_spectral_correction and not flat_is_spectralon and spec is None:
         raise ValueError('Need Spectralon folder; or set flat_is_spectralon=True for a large white flat')
 
+    iris_result = None
+    if use_iris_correction:
+        iris_result = calculate_iris_correction(
+            main, open_marker=iris_open_marker,
+            closed_marker=iris_closed_marker,
+            stability_cv_warning=iris_stability_cv_warning,
+            valid_dn_range=iris_valid_dn_range,
+            wavelength_range=iris_wavelength_range,
+            overwrite=overwrite_existing, show_plot=False)
+    iris_enabled = iris_result is not None
+    iris_factor = float(iris_result['coefficient']) if iris_enabled else 1.0
+    iris_signature = iris_result['input_signature'] if iris_enabled else None
+
     service_markers = (calibration_marker, spectralon_marker, flat_marker, dark_marker)
     samples = [
-        p for p in cubes
+        p for p in pipeline_cubes
         if not any(m.casefold() in p.parent.name.casefold() for m in service_markers)
     ]
     if not samples:
@@ -153,18 +241,20 @@ def process_wheat_study(
     def dark_process(cube):
         if cube is None:
             return None
-        if not use_dark_correction or cube == dark:
+        if not use_dark_correction or dark is None or cube == dark:
             return cube
         dest = cube.parent / 'dark_corrected_images'
-        if not (reuse_existing and _output_ready(dest, cube)):
-            dark_correct_images(cube, dark, dest)
+        if not (reuse_existing and dark_correction_ready(
+                cube, dark, dest, mode=dark_subtraction_mode)):
+            dark_correct_images(cube, dark, dest, mode=dark_subtraction_mode)
         return dest
 
     centers = None
     if use_alignment:
         cal_src = dark_process(cal)
         centers = main / 'centers_long.csv'
-        if not (reuse_existing and centers.is_file()):
+        if not (reuse_existing and centers.is_file() and
+                not _source_is_newer(centers, cal_src)):
             collect_aruco_folder(cal_src).to_csv(centers, index=False)
 
     def aligned(cube):
@@ -174,8 +264,11 @@ def process_wheat_study(
         if not use_alignment:
             return src
         dest = cube.parent / 'aligned_images'
-        if not (reuse_existing and _output_ready(dest, src)):
+        if not (reuse_existing and _output_ready(dest, src, dependencies=(centers,))):
+            (dest / 'pipeline_alignment_source.txt').unlink(missing_ok=True)
             align_spectral_images(centers, reference_wavelength, src, dest)
+            (dest / 'pipeline_alignment_source.txt').write_text(
+                str(Path(src).resolve()), encoding='utf-8')
         return dest
 
     flat_src = aligned(flat) if use_spatial_correction else None
@@ -183,14 +276,17 @@ def process_wheat_study(
     if use_spectral_correction and not flat_is_spectralon:
         reference_src = aligned(spec)
         spec_mask = main / 'spectralon_mask.png'
-        if not (reuse_existing and spec_mask.is_file()):
+        if not (reuse_existing and spec_mask.is_file() and
+                not _source_is_newer(spec_mask, reference_src)):
             sf = _index_images(reference_src)
             if int(spectralon_wavelength) not in sf:
                 raise ValueError(f'Spectralon wavelength {spectralon_wavelength} unavailable')
             segment_spectralon(sf[int(spectralon_wavelength)], spec_mask,
                                edge_margin_px=spectralon_edge_margin_px)
         spectralon_csv = main / 'spectralon_spectrum.csv'
-        if not (reuse_existing and spectralon_csv.is_file()):
+        if not (reuse_existing and spectralon_csv.is_file() and
+                not _source_is_newer(spectralon_csv, reference_src) and
+                spectralon_csv.stat().st_mtime_ns >= spec_mask.stat().st_mtime_ns):
             measure_spectralon(spec_mask, reference_src, spectralon_csv)
 
     rows, reports = [], []
@@ -204,7 +300,18 @@ def process_wheat_study(
         try:
             src = aligned(cube)
             stage = 'cube_generation'
-            if not (reuse_existing and _corrected_ready(corrected, src)):
+            radiometric_dependencies = []
+            if use_spatial_correction:
+                radiometric_dependencies.extend(_index_images(flat_src).values())
+            if spectralon_csv is not None:
+                radiometric_dependencies.append(spectralon_csv)
+            if iris_enabled:
+                radiometric_dependencies.append(main / IRIS_REPORT_NAME)
+            if not (reuse_existing and _corrected_ready(
+                    corrected, src, dependencies=radiometric_dependencies,
+                    iris_enabled=iris_enabled, iris_factor=iris_factor,
+                    iris_signature=iris_signature)):
+                (corrected / 'pipeline_cube_source.txt').unlink(missing_ok=True)
                 generate_reflectance_cube(
                     src, corrected,
                     flat_folder=flat_src,
@@ -216,9 +323,20 @@ def process_wheat_study(
                     save_float_cube=True,
                     cube_dtype=cube_dtype,
                     preview_percentiles=preview_percentiles,
+                    iris_correction_enabled=iris_enabled,
+                    iris_correction_factor=iris_factor,
+                    iris_calibration_signature=iris_signature,
                 )
+                (corrected / 'pipeline_cube_source.txt').write_text(
+                    str(Path(src).resolve()), encoding='utf-8')
+            if stop_after_cubes:
+                reports.append({'sample': label, 'status': 'ok', 'stage': 'cube_ready', 'error': '',
+                                'n_wavelengths': 0, 'n_pixels': 0})
+                continue
             stage = 'segmentation'
-            if not (reuse_existing and mask.is_file()):
+            cube_path = corrected / 'corrected_cube.npz'
+            if not (reuse_existing and mask.is_file() and
+                    mask.stat().st_mtime_ns >= cube_path.stat().st_mtime_ns):
                 segment_wheat_gwfss_tiled(
                     images_folder=corrected,
                     mask_path=mask,
@@ -233,7 +351,9 @@ def process_wheat_study(
                     class_map_path=cube.parent / 'wheat_classes.png',
                 )
             stage = 'spectrum'
-            if reuse_existing and spectrum_cache.is_file() and not overwrite_existing:
+            if (reuse_existing and spectrum_cache.is_file() and not overwrite_existing and
+                spectrum_cache.stat().st_mtime_ns >= max(
+                    cube_path.stat().st_mtime_ns, mask.stat().st_mtime_ns)):
                 df = _read_cached_spectrum(spectrum_cache)
             else:
                 spectrum = measure_plant_spectrum(corrected / 'corrected_cube.npz', mask)
@@ -268,7 +388,8 @@ def process_wheat_study(
     report = pd.DataFrame(reports)
     report.to_csv(main / 'processing_report.csv', index=False)
     if not rows:
-        logger.error('No successful samples in study %s', main)
+        if not stop_after_cubes:
+            logger.error('No successful samples in study %s', main)
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), report
 
     long = pd.concat(rows, ignore_index=True)

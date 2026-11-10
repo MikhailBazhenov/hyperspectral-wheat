@@ -1,29 +1,22 @@
-index,policy,draft_min,draft_max,note
+﻿index,policy,draft_min,draft_max,note
 NDVI,fixed,0,1,Green vegetation working range; negative values clipped
-NDVI_670,fixed,0,1,Green vegetation working range; negative values clipped
 GNDVI,fixed,0,1,Green vegetation working range; negative values clipped
 NDRE,fixed,0,1,Green vegetation working range; negative values clipped
 NDVI705,fixed,0,1,Green vegetation working range; negative values clipped
 CIgreen,adaptive,0,10,Ratio can exceed 1 and is unbounded
 CIrededge,adaptive,0,10,Ratio can exceed 1 and is unbounded
-SR,adaptive,1,20,Ratio is unbounded
-SR705,adaptive,1,10,Ratio is unbounded
 VOG1,adaptive,0.5,3,Ratio is unbounded
-MTCI,adaptive,-5,15,Unstable when red-edge denominator is small
+MTCI,adaptive,-5,15,Original 754/709/681 nm; linear interpolation of sampled bands
 PRI,adaptive,-0.2,0.2,Physically bounded -1..1 but much narrower typical response
-PRI570_530,adaptive,-0.2,0.2,Physically bounded -1..1 but much narrower typical response
 PSRI,adaptive,-1,2,Can be negative; no hard 0..1 limit
 SIPI,adaptive,0,4,Denominator close to zero can amplify noise
-ARI1,adaptive,-5,30,Inverse reflectance; not intrinsically bounded
 ARI2,adaptive,-3,10,Inverse reflectance weighted by NIR
 CRI1,adaptive,-5,40,Inverse reflectance; not intrinsically bounded
 CRI2,adaptive,-5,40,Inverse reflectance; not intrinsically bounded
-WBI,adaptive,0.7,1.6,900/970 ratio; reciprocal convention differs
-NRI,adaptive,-0.4,0.4,"Signed normalized difference, mathematically -1..1"
+WBI,adaptive,0.4,1.3,Original Peñuelas 1993 R970/R900; 970-nm SNR critical
 RGI,adaptive,0.3,4,Red/green ratio is unbounded
 R750_R700,adaptive,1,12,Red-edge reflectance ratio is unbounded
 mND705,adaptive,-1,3,Small denominator can produce values beyond -1..1
-MSR705,adaptive,0,10,Small denominator can amplify noise
 REP,adaptive,680,760,Result has nanometer units; not 0..1
 MCARI,adaptive,-1,2,Reflectance-scale index; not strictly bounded
 TCARI,adaptive,-1,3,Reflectance-scale index; not strictly bounded
@@ -36,3 +29,5 @@ EVI,adaptive,-0.5,1.5,Blue correction may produce values outside 0..1
 MSAVI,fixed,0,1,Vegetated-pixel working range; values outside are clipped
 MCARI_OSAVI,adaptive,-3,5,Ratio can diverge near zero OSAVI
 TCARI_OSAVI,adaptive,-3,8,Ratio can diverge near zero OSAVI
+NPCI,fixed,-1,1,Blue/red pigment contrast; watch SNR near 430 nm
+NPQI,fixed,-1,1,Published 415/435 nm; wavelengths interpolated on 10-nm grid; validate blue SNR

@@ -1,0 +1,33 @@
+﻿index,first_included,description,formula,required_nm,scale_invariant,reason
+NDVI,minimal,Normalized Difference Vegetation Index,(R800-R680)/(R800+R680),"800,680",True,General vegetation greenness and structural NIR/red contrast
+GNDVI,medium,Green Normalized Difference Vegetation Index,(R800-R550)/(R800+R550),"800,550",True,Green-band chlorophyll variation complementary to NDVI
+NDRE,minimal,Normalized Difference Red Edge,(R790-R720)/(R790+R720),"790,720",True,Red-edge sensitivity to chlorophyll when red absorption saturates
+NDVI705,medium,Red-edge normalized difference,(R750-R705)/(R750+R705),"750,705",True,"Localized red-edge normalized difference, unlike NDRE band pair"
+CIgreen,medium,Green Chlorophyll Index,R790/R550-1,"790,550",True,Green/NIR chlorophyll-sensitive ratio; pigment interference possible
+CIrededge,medium,Red-edge Chlorophyll Index,R790/R710-1,"790,710",True,NIR-to-red-edge chlorophyll index
+VOG1,maximum,Vogelmann Red-edge Index 1,R740/R720,"740,720",True,Additional/alternative index; use for targeted exploratory comparisons
+MTCI,medium,MERIS Terrestrial Chlorophyll Index (original bands),(R754-R709)/(R709-R681),"754,709,681",True,Ratio of red-edge spectral slopes
+PRI,minimal,Photochemical Reflectance Index,(R531-R570)/(R531+R570),"531,570",True,Original PRI 531/570: photochemistry-related pigment variation
+PSRI,minimal,Plant Senescence Reflectance Index,(R680-R500)/R750,"680,500,750",True,Senescence and relative chlorophyll/carotenoid changes
+SIPI,medium,Structure Insensitive Pigment Index,(R800-R445)/(R800-R680),"800,445,680",True,Carotenoid/chlorophyll balance with reduced structure sensitivity
+ARI2,minimal,Anthocyanin Reflectance Index 2,R800*(1/R550-1/R700),"550,700,800",True,Anthocyanin-related coloration
+CRI1,maximum,Carotenoid Reflectance Index 1,1/R510-1/R550,"510,550",False,Additional/alternative index; use for targeted exploratory comparisons
+CRI2,minimal,Carotenoid Reflectance Index 2,1/R510-1/R700,"510,700",False,Carotenoid-sensitive inverse reflectance contrast
+WBI,minimal,Plant Water Index (Peñuelas et al. 1993 convention),R970/R900,"970,900",True,Original water index R970/R900; check 970-nm signal-to-noise
+RGI,maximum,Red-Green Index,R690/R550,"690,550",True,Additional/alternative index; use for targeted exploratory comparisons
+R750_R700,maximum,Red-edge chlorophyll ratio,R750/R700,"750,700",True,Additional/alternative index; use for targeted exploratory comparisons
+mND705,medium,Modified ND705,(R750-R705)/(R750+R705-2*R445),"750,705,445",True,Blue-adjusted chlorophyll red-edge contrast
+REP,medium,"Red Edge Position, linear four-band estimate (nm)",700+40*((R670+R780)/2-R700)/(R740-R700),"670,780,700,740",False,Red-edge position in nanometres rather than an index ratio
+MCARI,maximum,Modified Chlorophyll Absorption Ratio Index,((R700-R670)-0.2*(R700-R550))*(R700/R670),"700,670,550",False,Additional/alternative index; use for targeted exploratory comparisons
+TCARI,maximum,Transformed Chlorophyll Absorption Ratio Index,3*((R700-R670)-0.2*(R700-R550)*(R700/R670)),"700,670,550",False,Additional/alternative index; use for targeted exploratory comparisons
+TVI,maximum,Triangular Vegetation Index,0.5*(120*(R750-R550)-200*(R670-R550)),"750,550,670",False,Additional/alternative index; use for targeted exploratory comparisons
+DVI,maximum,Difference Vegetation Index,R800-R680,"800,680",False,Additional/alternative index; use for targeted exploratory comparisons
+RDVI,maximum,Renormalized Difference Vegetation Index,(R800-R670)/sqrt(R800+R670),"800,670",False,Additional/alternative index; use for targeted exploratory comparisons
+OSAVI,minimal,Optimized Soil Adjusted Vegetation Index,1.16*(R800-R670)/(R800+R670+0.16),"800,670",False,Partial correction for visible substrate/soil background
+SAVI,maximum,Soil Adjusted Vegetation Index (L=0.5),1.5*(R800-R680)/(R800+R680+0.5),"800,680",False,Additional/alternative index; use for targeted exploratory comparisons
+EVI,maximum,Enhanced Vegetation Index,2.5*(R800-R680)/(R800+6*R680-7.5*R450+1),"800,680,450",False,Additional/alternative index; use for targeted exploratory comparisons
+MSAVI,medium,Modified Soil Adjusted Vegetation Index,(2*R800+1-sqrt((2*R800+1)^2-8*(R800-R670)))/2,"800,670",False,Alternative adaptive soil-background compensation
+MCARI_OSAVI,maximum,MCARI divided by OSAVI,MCARI/OSAVI,"700,670,550,800",False,Additional/alternative index; use for targeted exploratory comparisons
+TCARI_OSAVI,medium,TCARI divided by OSAVI,TCARI/OSAVI,"700,670,550,800",False,Chlorophyll absorption adjusted by soil-sensitive index
+NPCI,maximum,Normalized Pigment Chlorophyll Index,(R680-R430)/(R680+R430),"680,430",True,Blue/red pigment contrast (R680 and R430); validate blue SNR
+NPQI,maximum,Normalized Phaeophytinization Index (published band centers),(R415-R435)/(R415+R435),"415,435",True,Phaeophytinization-related contrast (415/435); interpret cautiously with 10-nm samples
