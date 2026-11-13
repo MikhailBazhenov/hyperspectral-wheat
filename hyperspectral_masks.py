@@ -132,6 +132,77 @@ def predict_sam_mask(rgb,points,labels,*,model_id=DEFAULT_SAM_ID,device=None):
     a=processed[0][0,choice].detach().cpu().numpy()
     return np.asarray(a>0,dtype=bool),float(scores[choice])
 
+def threshold_preview_mask(rgb, *, intensity_range=(10, 245), hue_range=(0, 360),
+                           use_intensity=True, use_hue=True, min_saturation=5):
+    """Candidate segmentation from the editor's RGB preview (not spectral Hue_LCh).
+
+    Intensity is HSV V (brightness) in uint8 0..255; hue is HSV angle in
+    degrees 0..360, including wraparound when the lower bound exceeds upper.
+    Both active filters must pass. No image values are modified or saved.
+    """
+    image = np.asarray(rgb, dtype=np.uint8)
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError('Expected an RGB HxWx3 uint8 preview')
+    low_v, high_v = map(float, intensity_range)
+    low_h, high_h = map(float, hue_range)
+    if not (0 <= low_v <= high_v <= 255 and 0 <= low_h <= 360 and 0 <= high_h <= 360):
+        raise ValueError('Intensity must lie in 0..255 and hue in 0..360 degrees')
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    mask = np.ones(image.shape[:2], dtype=bool)
+    if use_intensity:
+        mask &= (hsv[:, :, 2] >= low_v) & (hsv[:, :, 2] <= high_v)
+    if use_hue:
+        # Hue is undefined for grayscale pixels; reject near-zero saturation.
+        mask &= hsv[:, :, 1] >= min_saturation
+        degrees = hsv[:, :, 0].astype(np.float32) * 2.0
+        if low_h <= high_h:
+            mask &= (degrees >= low_h) & (degrees <= high_h)
+        else:
+            mask &= (degrees >= low_h) | (degrees <= high_h)
+    return mask
+
+
+@lru_cache(maxsize=1)
+def _load_sam3():
+    """Use official Meta SAM3 only if separately installed and authorized."""
+    try:
+        from sam3.model_builder import build_sam3_image_model
+        from sam3.model.sam3_image_processor import Sam3Processor
+    except ImportError as exc:
+        raise RuntimeError('SAM3 is optional. Install Meta facebookresearch/sam3 and '
+                           'obtain access to its model checkpoint; see README.') from exc
+    model = build_sam3_image_model()
+    return Sam3Processor(model)
+
+
+def predict_sam3_text_mask(rgb, prompt):
+    """Union all instances found by official SAM3 text-prompt image processor."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError('Enter a non-empty SAM3 text prompt')
+    processor = _load_sam3()
+    image = Image.fromarray(np.asarray(rgb, dtype=np.uint8), mode='RGB')
+    state = processor.set_image(image)
+    prediction = processor.set_text_prompt(state=state, prompt=prompt.strip())
+    masks = prediction.get('masks')
+    if masks is None or len(masks) == 0:
+        return np.zeros(rgb.shape[:2], dtype=bool), 0
+    if hasattr(masks, 'detach'):
+        masks = masks.detach().cpu().numpy()
+    masks = np.asarray(masks)
+    masks = np.squeeze(masks)
+    if masks.ndim == 2:
+        masks = masks[np.newaxis, ...]
+    if masks.ndim != 3:
+        raise ValueError(f'Unexpected SAM3 mask dimensions: {masks.shape}')
+    result = np.zeros(rgb.shape[:2], dtype=bool)
+    for single in masks:
+        if single.shape != result.shape:
+            single = cv2.resize(single.astype(np.float32), (result.shape[1], result.shape[0]),
+                                interpolation=cv2.INTER_NEAREST)
+        result |= single > 0
+    return result, len(masks)
+
+
 class MaskEditor:
     """Interactive ipympl editor. No file is changed until Save is clicked.
 
@@ -140,7 +211,7 @@ class MaskEditor:
     the last point. New object starts an empty mask with a new ID.
     """
     def __init__(self,sample_folder,object_id=None,*,rgb_wavelengths=(630,530,470),
-                 sam_model_id=DEFAULT_SAM_ID,brush_radius=16):
+                 sam_model_id=DEFAULT_SAM_ID,brush_radius=16, sam_backend='sam'):
         import matplotlib.pyplot as plt
         import ipywidgets as widgets
         from IPython.display import display
@@ -148,6 +219,9 @@ class MaskEditor:
         self.rgb=make_rgb_from_cube(self.sample/'corrected_images'/'corrected_cube.npz',rgb_wavelengths)
         self.h,self.w=self.rgb.shape[:2]
         self.sam_model_id=sam_model_id
+        if sam_backend not in ('sam', 'sam2', 'sam3'):
+            raise ValueError('sam_backend must be sam, sam2 or sam3')
+        self.sam_backend=sam_backend
         self.available=list_object_masks(self.sample)
         self.object_id=object_id or (next(iter(self.available)) if self.available else 'object_01')
         self._load_current()
@@ -156,16 +230,37 @@ class MaskEditor:
         self.mode=widgets.ToggleButtons(options=[('Positive +','positive'),('Negative −','negative'),
             ('Brush','brush'),('Eraser','eraser')],value='positive',description='Tool:')
         self.radius=widgets.IntSlider(value=brush_radius,min=1,max=100,description='Radius')
+        self.threshold_intensity=widgets.IntRangeSlider(value=(10,245),min=0,max=255,
+            description='HSV V 0–255',continuous_update=False,layout=widgets.Layout(width='540px'))
+        self.hue_low=widgets.FloatSlider(value=0.,min=0,max=360,step=2,
+            description='HSV H low °',continuous_update=False,layout=widgets.Layout(width='540px'))
+        self.hue_high=widgets.FloatSlider(value=360.,min=0,max=360,step=2,
+            description='HSV H high °',continuous_update=False,layout=widgets.Layout(width='540px'))
+        self.use_intensity=widgets.Checkbox(value=True,description='Use intensity V')
+        self.use_hue=widgets.Checkbox(value=False,description='Use HSV hue')
+        self.min_saturation=widgets.IntSlider(value=5,min=0,max=255,description='Min HSV S')
+        self.sam3_prompt=widgets.Text(value='wheat leaves',description='Text (SAM3)',
+            layout=widgets.Layout(width='450px'))
         self.name=widgets.Text(value=self.object_id,description='Object ID')
         self.select=widgets.Dropdown(options=[('New object','__new__')]+[(x,x) for x in self.available],
                                       value=self.object_id if self.object_id in self.available else '__new__',description='Existing')
         self.status=widgets.HTML(value='<b>Click to place points. Save writes a new mask file.</b>')
         buttons={}
-        for label,key in [('Run SAM','sam'),('Undo point','undo_point'),('Clear points','clear_points'),
+        for label,key in [('Run SAM','sam'),('Run SAM3 text','sam3_text'),('Threshold preview','threshold'),('Undo point','undo_point'),('Clear points','clear_points'),
                           ('Undo edit','undo'),('Clear mask','clear'),('Save mask','save'),
                           ('New object','new'),('Skip / close','skip'),('Cancel without saving','cancel')]:
             b=widgets.Button(description=label,layout=widgets.Layout(width='145px'))
             b.on_click(lambda _,key=key:self._button(key));buttons[key]=b
+        if sam_backend!='sam3':
+            buttons['sam3_text'].disabled=True
+            buttons['sam3_text'].tooltip='Text prompts are supported only in SAM3'
+            self.sam3_prompt.disabled=True
+        if sam_backend=='sam3':
+            buttons['sam'].disabled=True
+            buttons['sam'].tooltip='For SAM3, use text prompt (and brush/eraser)'
+        if sam_backend=='sam2':
+            buttons['sam'].disabled=True
+            buttons['sam'].tooltip='SAM2 point inference is not configured; use threshold/brush'
         self.fig,self.ax=plt.subplots(figsize=(12,7))
         self.ax.set_axis_off();self.ax.set_title(self.sample.name)
         self.base_artist=self.ax.imshow(self.rgb)
@@ -178,6 +273,9 @@ class MaskEditor:
         self.widget=widgets.VBox([
             widgets.HBox([self.select,self.name]),
             widgets.HBox([self.mode,self.radius]),
+            widgets.HBox([self.use_intensity,self.use_hue,buttons['threshold']]),
+            self.threshold_intensity,self.hue_low,self.hue_high,self.min_saturation,
+            widgets.HBox([self.sam3_prompt,buttons['sam3_text']]),
             widgets.HBox([buttons[k] for k in ['sam','undo_point','clear_points','undo']]),
             widgets.HBox([buttons[k] for k in ['clear','save','new','skip','cancel']]),
             self.status,self.fig.canvas])
@@ -237,7 +335,24 @@ class MaskEditor:
             elif key=='undo':
                 if self.undo_stack:self.mask=self.undo_stack.pop()
             elif key=='clear':self.undo_stack.append(self.mask.copy());self.mask[:]=False
+            elif key=='threshold':
+                predicted=threshold_preview_mask(self.rgb,
+                    intensity_range=self.threshold_intensity.value,
+                    hue_range=(self.hue_low.value,self.hue_high.value),
+                    use_intensity=self.use_intensity.value,
+                    use_hue=self.use_hue.value,
+                    min_saturation=self.min_saturation.value)
+                self.undo_stack.append(self.mask.copy());self.mask=predicted
+                self._message(f'Threshold candidate: {int(predicted.sum())} pixels; edit/undo/save.')
+            elif key=='sam3_text':
+                if self.sam_backend!='sam3':
+                    raise ValueError('Text prompts only available with SAM3')
+                predicted,n=predict_sam3_text_mask(self.rgb,self.sam3_prompt.value)
+                self.undo_stack.append(self.mask.copy());self.mask=predicted
+                self._message(f'SAM3 instances: {n}; edit/undo/save.')
             elif key=='sam':
+                if self.sam_backend!='sam':
+                    raise ValueError('The point-prompt button is configured for SAM1 only')
                 predicted,score=predict_sam_mask(self.rgb,self.points,self.labels,model_id=self.sam_model_id)
                 self.undo_stack.append(self.mask.copy());self.mask=predicted
                 self._message(f'SAM candidate (predicted IoU {score:.3f}); refine with brush/eraser, then save.')

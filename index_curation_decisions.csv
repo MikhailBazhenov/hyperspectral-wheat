@@ -18,3 +18,7 @@ WBI_970_900,merged into WBI,Use one R970/R900 series per Peñuelas et al. 1993; 
 NPCI,retained,"Distinct normalized pigment contrast, originally in legacy code."
 NPQI,added,Published phaeophytinization index 415/435 rather than legacy 420/440.
 MTCI,updated,Use literature band centers 754/709/681 rather than 750/710/680.
+CSIB,added_v7.2,Brassica-origin R525/R800 ratio added as exploratory wheat stress descriptor; no species-specific validation claimed.
+Hue_LCh,added_v7.2,Spectral CIELCh(ab) hue derived from raw calibrated reflectance under D65; not HSV image hue.
+EWRI_410_900,added_v7.3,Experimental epicuticular-wax ratio R410/R900 requested for wax-quality exploration and included in the medium preset.
+EWRI_410_950,added_v7.3,Companion experimental epicuticular-wax ratio R410/R950 requested for wax-quality exploration and included in the medium preset.

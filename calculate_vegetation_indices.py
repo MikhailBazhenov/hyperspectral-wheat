@@ -48,6 +48,10 @@ INDEX_INFO = {
     'TCARI_OSAVI': ('TCARI divided by OSAVI', 'TCARI/OSAVI', (700,670,550,800), False),
     'NPCI': ('Normalized Pigment Chlorophyll Index', '(R680-R430)/(R680+R430)', (680,430), True),
     'NPQI': ('Normalized Phaeophytinization Index (published band centers)', '(R415-R435)/(R415+R435)', (415,435), True),
+    'CSIB': ('Brassica climate-stress index (exploratory for wheat)', 'R525/R800', (525,800), True),
+    'EWRI_410_900': ('Epicuticular Wax Ratio Index (experimental)', 'R410/R900', (410,900), True),
+    'EWRI_410_950': ('Epicuticular Wax Ratio Index (experimental)', 'R410/R950', (410,950), True),
+    'Hue_LCh': ('CIELCh(ab) spectral hue h_ab [degrees], D65/CIE1931 2°, 400–780 nm', 'atan2(b*,a*) mod 360; R400..R780 integrated under D65', tuple(range(400,781,10)), False),
 }
 
 
@@ -57,7 +61,7 @@ def _div(a, b):
 
 
 def _read_spectra(path):
-    df = pd.read_csv(path)
+    df = path.copy() if isinstance(path, pd.DataFrame) else pd.read_csv(path)
     if {'sample', 'wavelength', 'mean_intensity'}.issubset(df.columns):
         if df.duplicated(['sample', 'wavelength']).any():
             raise ValueError('Duplicate sample/wavelength rows in long input')
@@ -91,16 +95,20 @@ def calculate_vegetation_indices(
     ----------
     spectra_csv : path
         Wide spectra_mean.csv (wavelength, sample1, sample2...) or
-        spectra_long.csv (sample, wavelength, mean_intensity, ...).
+        spectra_long.csv (sample, wavelength, mean_intensity, ...),
+        or an in-memory pandas DataFrame with the same structure.
     output_csv : path or None
         Output with one row per sample and index columns.
     metadata_csv : path or None
         Optional CSV with index definitions and scale requirements.
-    data_type : {'signal','signal_exploratory','reflectance'}
+    data_type : {'signal','signal_exploratory','reflectance','normalized_reflectance'}
         'signal': use only dimensionless, scale-invariant indices (plus REP,
         which is invariant to multiplication; not to offset). All others NaN.
         'reflectance': input values must be valid reflectance fractions [0,1]
         and all supported indices are computed.
+        'normalized_reflectance': evaluate formulas on object-mean-normalized
+        reflectance shape; ratios preserve scale invariance but additive constants
+        or inverse-reflectance formulas lose their standard physical meaning.
         'signal_exploratory': calculate ALL formulas on raw signal values,
         even when their numerical results are not physically interpretable
         as established reflectance indices. For exploration only.
@@ -120,8 +128,14 @@ def calculate_vegetation_indices(
     -------
     pandas.DataFrame: rows=samples; columns=indices, with 'sample' column.
     """
-    if data_type not in ('signal','signal_exploratory','reflectance'):
+    if data_type not in ('signal','signal_exploratory','reflectance','normalized_reflectance'):
         raise ValueError("data_type must be 'signal', 'signal_exploratory' or 'reflectance'")
+    if data_type == 'normalized_reflectance':
+        import warnings
+        warnings.warn('Mean-normalized reflectance is dimensionless shape data, not absolute '
+                      'reflectance; index formulas with inverse reflectance or additive '
+                      'constants have exploratory numerical meanings only.',
+                      UserWarning, stacklevel=2)
     if data_type == 'signal_exploratory':
         import warnings
         warnings.warn(
@@ -188,7 +202,17 @@ def calculate_vegetation_indices(
             'TCARI_OSAVI': _div(tcari,osavi),
             'NPCI': nd(680,430),
             'NPQI': nd(415,435),
+            'CSIB': _div(x(525),x(800)),
+            'EWRI_410_900': _div(x(410),x(900)),
+            'EWRI_410_950': _div(x(410),x(950)),
         }
+
+    if 'Hue_LCh' in (indices if indices is not None else __import__('index_presets').resolve_indices(index_preset)):
+        if data_type == 'reflectance':
+            from spectral_colorimetry import spectral_hue
+            values['Hue_LCh'] = spectral_hue(w, raw.T)
+        else:
+            values['Hue_LCh'] = np.full(raw.shape[1], np.nan)
 
     # REP (a wavelength, nm) and ARI2 remain invariant under multiplicative
     # scaling, whereas CRI1/2 do not.

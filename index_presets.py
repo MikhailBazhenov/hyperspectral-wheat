@@ -23,6 +23,7 @@ MINIMAL = (
 MEDIUM_EXTRAS = (
     'GNDVI', 'CIgreen', 'CIrededge', 'NDVI705', 'MTCI',
     'SIPI', 'REP', 'mND705', 'TCARI_OSAVI', 'MSAVI',
+    'CSIB', 'EWRI_410_900', 'EWRI_410_950', 'Hue_LCh',
 )
 
 MEDIUM = MINIMAL + MEDIUM_EXTRAS
@@ -51,6 +52,10 @@ REASONS = {
     'MSAVI': 'Alternative adaptive soil-background compensation',
     'NPCI': 'Blue/red pigment contrast (R680 and R430); validate blue SNR',
     'NPQI': 'Phaeophytinization-related contrast (415/435); interpret cautiously with 10-nm samples',
+    'CSIB': 'R525/R800 climate stress indicator from Brassica literature; exploratory in wheat',
+    'EWRI_410_900': 'Experimental epicuticular-wax descriptor using the blue-to-NIR ratio R410/R900',
+    'EWRI_410_950': 'Experimental epicuticular-wax descriptor using the blue-to-NIR ratio R410/R950',
+    'Hue_LCh': 'Spectral CIELCh(ab) hue h_ab from unnormalized reflectance (D65, 400-780 nm); distinct from preview HSV hue',
 }
 
 

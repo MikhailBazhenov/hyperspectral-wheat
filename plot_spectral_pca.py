@@ -34,7 +34,7 @@ def plot_spectral_pca(
     Parameters
     ----------
     spectra_csv : str or Path
-        CSV with wavelength column and sample columns (wide format).
+        CSV path or in-memory DataFrame with wavelength and sample columns (wide format).
     output_png : str or Path, optional
         Save figure as PNG.
     output_scores_csv : str or Path, optional
@@ -79,7 +79,7 @@ def plot_spectral_pca(
     Missing interior wavelength values are linearly interpolated; missing values
     at spectral endpoints cause an error (no extrapolation).
     """
-    df = pd.read_csv(spectra_csv)
+    df = spectra_csv.copy() if isinstance(spectra_csv, pd.DataFrame) else pd.read_csv(spectra_csv)
     if "wavelength" not in df.columns:
         raise ValueError("CSV must contain a 'wavelength' column.")
     if df.columns.duplicated().any():

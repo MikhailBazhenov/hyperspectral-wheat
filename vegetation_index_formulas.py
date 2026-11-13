@@ -79,7 +79,16 @@ def compute_index_maps(wavelengths, cube, data_type='signal', interpolate=True, 
             'TCARI_OSAVI': _div(tcari,osavi),
             'NPCI': nd(680,430),
             'NPQI': nd(415,435),
+            'CSIB': _div(x(525),x(800)),
+            'EWRI_410_900': _div(x(410),x(900)),
+            'EWRI_410_950': _div(x(410),x(950)),
         }
+
+    if data_type == 'reflectance':
+        from spectral_colorimetry import spectral_hue
+        values['Hue_LCh'] = spectral_hue(wavelengths, cube)
+    else:
+        values['Hue_LCh'] = np.full(cube.shape[:2], np.nan, dtype=np.float32)
 
     if data_type == 'signal':
         for name in list(values):
@@ -202,6 +211,12 @@ def compute_single_index_map(wavelengths, cube, index, data_type='signal', inter
         elif index == 'TCARI_OSAVI': value = _div(tcari(),osavi())
         elif index == 'NPCI': value = nd(680,430)
         elif index == 'NPQI': value = nd(415,435)
+        elif index == 'CSIB': value = _div(x(525),x(800))
+        elif index == 'EWRI_410_900': value = _div(x(410),x(900))
+        elif index == 'EWRI_410_950': value = _div(x(410),x(950))
+        elif index == 'Hue_LCh':
+            from spectral_colorimetry import spectral_hue
+            value = spectral_hue(wavelengths, cube)
         else:
             raise RuntimeError('Not implemented: ' + index)
     value = np.asarray(value, dtype=np.float32)

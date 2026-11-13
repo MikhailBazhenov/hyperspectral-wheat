@@ -116,6 +116,17 @@ def _valid_pixels(valid_cube, reader, wavelengths, plant, requested):
 
 
 def _calculate(name, cube, wls, valid_cube, plant, reader, data_type):
+    if name=='Hue_LCh':
+        if data_type!='reflectance':
+            return np.full(cube.shape[:2], np.nan, dtype=np.float32), [], []
+        from spectral_colorimetry import spectral_hue
+        try:
+            arr=spectral_hue(wls,cube,valid_mask=valid_cube)
+        except ValueError:
+            return np.full(cube.shape[:2], np.nan, dtype=np.float32), [], [400,780]
+        arr=np.asarray(arr,dtype=np.float32)
+        arr[~plant]=np.nan
+        return arr, [], []
     requested = INDEX_INFO[name][2]
     status, interpolated, missing = reader_status(reader, requested)
     if missing:
