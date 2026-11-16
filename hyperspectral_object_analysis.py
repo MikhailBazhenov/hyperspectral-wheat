@@ -21,7 +21,9 @@ from vegetation_index_formulas import save_map_fast
 from simple_xlsx import write_dataframe_xlsx
 from index_histograms import histogram_columns
 from spectral_preprocessing import mean_normalize, SPECTRAL_VARIANTS
+from PIL import Image
 
+COLOR_RGB_NAME='Color_RGB'
 SERVICE_MARKERS=('calibration_target','spectralon','flat','dark','open_iris','closed_iris')
 
 
@@ -159,6 +161,16 @@ def _spectra_and_indices(main, samples, *, mode, window, poly, data_type, indice
         except (OSError, ValueError):pass
     return df,spectra
 
+def _save_color_rgb_image(rgb, region, dest):
+    rgb = np.asarray(rgb, dtype=np.uint8)
+    masked = np.zeros_like(rgb)
+    masked[np.asarray(region, dtype=bool)] = rgb[np.asarray(region, dtype=bool)]
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(masked, mode='RGB').save(dest)
+    return dest
+
+
 def _index_map_ranges(main,samples,mode,names,data_type,scale_config,empirical_strategy,histogram_bins):
     """Pass 1: all-object per-index statistics, respecting the selected mask mode."""
     observations=[]
@@ -202,7 +214,8 @@ def _index_map_ranges(main,samples,mode,names,data_type,scale_config,empirical_s
 
 def render_object_index_maps(main_folder, *, mode='individual', indices=None, index_preset='medium',
                             scale_config=None, empirical_strategy='robust',
-                            data_type='reflectance',overwrite=True,histogram_bins=10):
+                            data_type='reflectance',overwrite=True,histogram_bins=10,
+                            render_color_images=True, color_image_name=COLOR_RGB_NAME):
     main=Path(main_folder).expanduser().resolve()
     samples=find_samples(main)
     names=resolve_indices(index_preset, indices)
@@ -216,6 +229,15 @@ def render_object_index_maps(main_folder, *, mode='individual', indices=None, in
         if data_type=='reflectance' and kind!='reflectance':raise ValueError(f'Expected reflectance: {sample}')
         reader=BandSampler(wls,cube,axis=2,max_cached_bands=12)
         masks=selected_masks(sample,cube.shape[:2],mode=mode)
+        rgb_image = None
+        rgb_error = None
+        if render_color_images:
+            try:
+                from spectral_colorimetry import spectral_srgb
+                rgb_image = spectral_srgb(wls, cube, valid_mask=valid)
+            except Exception as exc:
+                rgb_error = f'{type(exc).__name__}: {exc}'
+                print(f'WARNING color RGB for {sample.name}: {rgb_error}')
         for name in names:
             arr,interpolated,missing=_calculate(name,cube,wls,valid,np.ones(cube.shape[:2],bool),reader,data_type)
             lo,hi,source=bounds[name]
@@ -228,7 +250,18 @@ def render_object_index_maps(main_folder, *, mode='individual', indices=None, in
                                   vmin=lo,vmax=hi,cmap='hsv' if name=='Hue_LCh' else 'viridis')
                 rows.append(dict(sample=sample.relative_to(main).as_posix(),mask=mask_id,index=name,
                     output_png=str(dest),valid_pixels=int((region & np.isfinite(arr)).sum()),
-                    vmin=lo,vmax=hi,scale=source,missing_bands=','.join(map(str,missing))))
+                    vmin=lo,vmax=hi,scale=source,missing_bands=','.join(map(str,missing)),
+                    visualization_type='index_map'))
+        if render_color_images:
+            for mask_id,region in masks.items():
+                dest=sample/'object_analysis'/'index_maps'/mask_id/f'{color_image_name}.png'
+                if rgb_image is not None and (overwrite or not dest.exists()):
+                    _save_color_rgb_image(rgb_image, region, dest)
+                rows.append(dict(sample=sample.relative_to(main).as_posix(),mask=mask_id,index=color_image_name,
+                    output_png=str(dest),valid_pixels=int(region.sum()), vmin=np.nan, vmax=np.nan,
+                    scale='colorimetric_srgb_from_full_cube' if rgb_image is not None else 'not_rendered',
+                    missing_bands='' if rgb_error is None else '400..780',
+                    visualization_type='color_rgb'))
         print(f'Index maps: {sample.name} / {len(masks)} mask(s)',flush=True)
     report=pd.DataFrame(rows)
     _save_table(report,main/'object_analysis'/'index_maps_report.xlsx')
@@ -274,7 +307,8 @@ def analyze_study_objects(main_folder, *, mask_mode='individual',map_mode=None,
                           n_clusters='auto',data_type='reflectance',
                           color_config_csv=None,indices=None,index_preset='medium',overwrite_maps=True,
                           empirical_strategy='robust',pca_maps=True,pca_map_mode=None,
-                          histogram_bins=10,spectral_variant='raw_normalized'):
+                          histogram_bins=10,spectral_variant='raw_normalized',
+                          render_color_images=True):
     """Stage 3. For map_mode choose individual, union, full, or none.
 
     Spectra/indices/PCA objects use mask_mode. If no masks are present,
@@ -355,6 +389,15 @@ def analyze_study_objects(main_folder, *, mask_mode='individual',map_mode=None,
     if map_mode is not None:
         report=render_object_index_maps(main,mode=map_mode,indices=names,scale_config=color_config_csv,
             empirical_strategy=empirical_strategy,data_type=data_type,
-            overwrite=(overwrite_maps or formula_changed),histogram_bins=histogram_bins)
+            overwrite=(overwrite_maps or formula_changed),histogram_bins=histogram_bins,
+            render_color_images=render_color_images)
+        settings_path = out/'analysis_settings.json'
+        try:
+            settings = json.loads(settings_path.read_text(encoding='utf-8')) if settings_path.is_file() else {}
+        except Exception:
+            settings = {}
+        settings['render_color_images'] = bool(render_color_images)
+        settings['color_image_name'] = COLOR_RGB_NAME if render_color_images else ''
+        settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding='utf-8')
         # Stage 3 saves numerical maps only. Date-sorted collages are Stage 4.
     return df

@@ -215,6 +215,11 @@ def analyze_experiment_by_date(main_folder, *,
     index_frame=read_dataframe_xlsx(out/'indices_selected.xlsx')
     selected=read_dataframe_xlsx(out/'selected_indices.xlsx')
     names=list(selected['index']) if indices is None else list(dict.fromkeys(indices))
+    collage_names = list(names)
+    if stage3.get('render_color_images'):
+        color_name = str(stage3.get('color_image_name') or 'Color_RGB')
+        if color_name not in collage_names:
+            collage_names.append(color_name)
     missing=[n for n in names if n not in index_frame.columns]
     if missing:raise ValueError(f'Selected index tables are missing {missing}; rerun Stage 3')
     classification=_classify(objects,gc,gd,ec,ed,dc,dd)
@@ -226,7 +231,7 @@ def analyze_experiment_by_date(main_folder, *,
     if create_collages:
         create_experiment_collages(main,genotypes_codes=gc,genotypes_display=gd,
             environment_codes=ec,environment_display=ed,dates_codes=dc,dates_display=dd,
-            indices=names,per_cell_columns=per_cell_columns,overwrite=overwrite)
+            indices=collage_names,per_cell_columns=per_cell_columns,overwrite=overwrite)
     base=out/'by_date'
     base.mkdir(exist_ok=True,parents=True)
     summary=[]

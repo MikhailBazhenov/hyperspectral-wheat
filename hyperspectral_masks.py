@@ -60,20 +60,52 @@ def read_mask(path, expected_shape):
         raise ValueError(f'Mask missing or wrong size: {path}, required={expected_shape}')
     return a>0
 
-def make_rgb_from_cube(cube_path, rgb_wavelengths=(630,530,470),percentiles=(1,99)):
-    """RGB from corrected preview bands; avoids loading the full NPZ for SAM."""
+def _save_preview_image(sample_folder, rgb, *, filename='mask_preview.png'):
+    sample = Path(sample_folder)
+    folder = sample / 'Images'
+    folder.mkdir(parents=True, exist_ok=True)
+    dest = folder / filename
+    Image.fromarray(np.asarray(rgb, dtype=np.uint8), mode='RGB').save(dest)
+    return dest
+
+
+def make_rgb_from_cube(cube_path, rgb_wavelengths=(630,530,470), percentiles=(1,99),
+                       mode='fast', save_to_images=False, output_name='mask_preview.png'):
+    """Create an RGB preview from the corrected cube.
+
+    mode='fast' uses three preview bands. mode='accurate' converts the full
+    calibrated reflectance cube to colorimetric sRGB using the same spectral
+    workflow as Hue_LCh (CIE 1931 2°, D65, 400..780 nm).
+    When save_to_images=True, the preview is written to SAMPLE/Images/.
+    """
+    mode = str(mode).strip().lower()
+    cube_path = Path(cube_path)
+    sample_folder = cube_path.parent.parent
+    if mode not in ('fast', 'accurate'):
+        raise ValueError("mode must be 'fast' or 'accurate'")
+    if mode == 'accurate':
+        from spectral_colorimetry import spectral_srgb
+        cube,wls,valid,_=load_quant_cube(cube_path)
+        rgb = spectral_srgb(wls, cube, valid_mask=valid)
+        if save_to_images:
+            _save_preview_image(sample_folder, rgb, filename=output_name)
+        return rgb
+    # fast three-band preview
     from segment_wheat_gwfss import _load_band,_to_uint8
-    folder=Path(cube_path).parent
+    folder=cube_path.parent
     bands=[]
     for nm in rgb_wavelengths:
         try:
             bands.append(_to_uint8(_load_band(folder,int(nm)),stretch_percentiles=percentiles))
         except ValueError as exc:
-            # Fallback if an older generated cube has no preview images.
-            if 'Expected one image' not in str(exc):raise
+            if 'Expected one image' not in str(exc):
+                raise
             break
     if len(bands)==3 and len({b.shape for b in bands})==1:
-        return np.stack(bands,axis=-1)
+        rgb = np.stack(bands,axis=-1)
+        if save_to_images:
+            _save_preview_image(sample_folder, rgb, filename=output_name)
+        return rgb
     cube,wls,valid,_=load_quant_cube(cube_path)
     parts=[]
     for wl in rgb_wavelengths:
@@ -85,7 +117,11 @@ def make_rgb_from_cube(cube_path, rgb_wavelengths=(630,530,470),percentiles=(1,9
         lo,hi=np.percentile(f,percentiles)
         hi=max(float(hi),float(lo)+1e-8)
         parts.append(np.nan_to_num(np.clip((band-lo)/(hi-lo),0,1)*255,nan=0).astype(np.uint8))
-    return np.stack(parts,axis=2)
+    rgb = np.stack(parts,axis=2)
+    if save_to_images:
+        _save_preview_image(sample_folder, rgb, filename=output_name)
+    return rgb
+
 
 def _sam_folder(model_id):
     name='SAM_'+re.sub(r'[^A-Za-z0-9_-]+','_',model_id)
@@ -211,12 +247,15 @@ class MaskEditor:
     the last point. New object starts an empty mask with a new ID.
     """
     def __init__(self,sample_folder,object_id=None,*,rgb_wavelengths=(630,530,470),
-                 sam_model_id=DEFAULT_SAM_ID,brush_radius=16, sam_backend='sam'):
+                 sam_model_id=DEFAULT_SAM_ID,brush_radius=16, sam_backend='sam',
+                 rgb_render_mode='fast', save_preview_to_images=True):
         import matplotlib.pyplot as plt
         import ipywidgets as widgets
         from IPython.display import display
         self.sample=Path(sample_folder)
-        self.rgb=make_rgb_from_cube(self.sample/'corrected_images'/'corrected_cube.npz',rgb_wavelengths)
+        self.rgb=make_rgb_from_cube(self.sample/'corrected_images'/'corrected_cube.npz',
+                                    rgb_wavelengths, mode=rgb_render_mode,
+                                    save_to_images=save_preview_to_images)
         self.h,self.w=self.rgb.shape[:2]
         self.sam_model_id=sam_model_id
         if sam_backend not in ('sam', 'sam2', 'sam3'):
@@ -384,7 +423,8 @@ def edit_mask(sample_folder, object_id=None, **kwargs):
     return MaskEditor(sample_folder,object_id=object_id,**kwargs)
 
 def segment_samples(main_folder, *, model='segformer',overwrite=False,
-                    rgb_wavelengths=(630,530,470),**segformer_options):
+                    rgb_wavelengths=(630,530,470), rgb_render_mode='fast',
+                    save_preview_to_images=True, **segformer_options):
     """Generate initial SegFormer masks, or provide SAM/manual editor entry points.
 
     SAM is interactive; call edit_mask(sample) for each desired sample rather
@@ -397,6 +437,8 @@ def segment_samples(main_folder, *, model='segformer',overwrite=False,
         raise ValueError('model must be segformer, sam or none')
     for cube in sorted(main.rglob('corrected_cube.npz')):
         sample=cube.parent.parent
+        _ = make_rgb_from_cube(cube, rgb_wavelengths, mode=rgb_render_mode,
+                              save_to_images=save_preview_to_images)
         if model=='segformer':
             path=sample/'masks'/'object_01.png'
             if not path.is_file() and not overwrite and (sample/'wheat_mask.png').is_file():

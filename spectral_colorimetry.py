@@ -110,3 +110,70 @@ def spectral_lch(wavelengths, reflectance, *, illuminant='D65', valid_mask=None,
 def spectral_hue(wavelengths, reflectance, *, illuminant='D65', valid_mask=None):
     return spectral_lch(wavelengths, reflectance, illuminant=illuminant,
                         valid_mask=valid_mask)[2]
+
+
+def spectral_xyz(wavelengths, reflectance, *, illuminant='D65', valid_mask=None, block_rows=128):
+    """Return CIE XYZ (last axis=3) computed from 400..780 nm reflectance.
+
+    Invalid pixels/bands return NaN XYZ. The integration grid and white reference
+    are the same truncated 400..780 nm setup used by spectral_lch().
+    """
+    select, keys = _colour_slices(wavelengths)
+    matrix, white = _weights(keys, illuminant.upper())
+    R = np.asarray(reflectance)
+    if R.shape[-1] != len(wavelengths):
+        raise ValueError('Reflectance last dimension must match wavelengths')
+    if valid_mask is not None and np.asarray(valid_mask).shape != R.shape:
+        raise ValueError('valid_mask must match reflectance shape')
+    if R.ndim in (1, 2):
+        z = np.asarray(R[..., select], dtype=np.float64)
+        good = np.isfinite(z).all(axis=-1) & (z >= 0).all(axis=-1)
+        if valid_mask is not None:
+            good &= np.asarray(valid_mask)[..., select].all(axis=-1)
+        XYZ = np.einsum('...b,bc->...c', np.where(np.isfinite(z), z, 0), matrix)
+        return np.where(good[..., None], XYZ, np.nan)
+    if R.ndim != 3:
+        raise ValueError('reflectance must have 1, 2 or 3 dimensions')
+    h, w = R.shape[:2]
+    XYZ = np.full((h, w, 3), np.nan, np.float32)
+    for begin in range(0, h, block_rows):
+        end = min(begin + block_rows, h)
+        z = np.asarray(R[begin:end, :, select], dtype=np.float32)
+        good = np.isfinite(z).all(axis=-1) & (z >= 0).all(axis=-1)
+        if valid_mask is not None:
+            good &= np.asarray(valid_mask)[begin:end, :, select].all(axis=-1)
+        xyz = np.einsum('hwb,bc->hwc', np.where(np.isfinite(z), z, 0), matrix)
+        XYZ[begin:end] = np.where(good[..., None], xyz, np.nan)
+    return XYZ
+
+
+def spectral_srgb(wavelengths, reflectance, *, illuminant='D65', valid_mask=None,
+                  background=(0, 0, 0), block_rows=128):
+    """Return colorimetric sRGB uint8 image/object derived from the full spectrum.
+
+    Uses the same 400..780 nm CIE 1931 2° / D65 workflow as spectral_lch().
+    For 2D/3D inputs the output has trailing RGB channels. Invalid pixels become
+    the chosen background color.
+    """
+    try:
+        import colour
+    except ImportError as exc:
+        raise ImportError('Color RGB rendering requires colour-science: pip install colour-science') from exc
+    XYZ = spectral_xyz(wavelengths, reflectance, illuminant=illuminant,
+                       valid_mask=valid_mask, block_rows=block_rows)
+    bg = np.asarray(background, dtype=np.uint8)
+    if XYZ.ndim == 2 and XYZ.shape[-1] == 3:
+        rgb = colour.XYZ_to_sRGB(np.nan_to_num(XYZ, nan=0.0), apply_cctf_encoding=True)
+        rgb = np.clip(rgb, 0.0, 1.0)
+        out = np.round(rgb * 255).astype(np.uint8)
+        valid = np.isfinite(XYZ).all(axis=-1)
+        if out.ndim == 2:
+            out = out.reshape(1, 3)
+        out[~valid] = bg
+        return out
+    rgb = colour.XYZ_to_sRGB(np.nan_to_num(XYZ, nan=0.0), apply_cctf_encoding=True)
+    rgb = np.clip(rgb, 0.0, 1.0)
+    out = np.round(rgb * 255).astype(np.uint8)
+    valid = np.isfinite(XYZ).all(axis=-1)
+    out[~valid] = bg
+    return out
