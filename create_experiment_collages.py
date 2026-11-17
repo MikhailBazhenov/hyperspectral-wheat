@@ -101,15 +101,14 @@ def create_experiment_collages(
     tile_height=230,
     per_cell_columns=2,
     overwrite=True,
+    genotypes_as_columns=False,
 ):
-    """Create sorted index collages: genotypes in rows, environments in columns.
+    """Create date-wise sorted collages, optionally transposing the layout.
 
-    Each combination contains all available sample/mask maps (technical repeats).
-    Unmatched/ambiguous folders are listed in the Excel report, NOT silently
-    assigned to a category. The original folders are never moved or renamed.
-    Results: <study>/object_analysis/collages_by_experiment/collage_<index>.png
-             <study>/object_analysis/experiment_grouping.xlsx
-             <study>/object_analysis/experiment_grouping_config.json
+    Default: genotype rows, environment columns. With genotypes_as_columns=True:
+    environment rows, genotype columns. Replicate tiles stay within their cell.
+    Existing masks, source maps and separately collected map folders are untouched.
+    Unmatched/ambiguous sample names are recorded, not assigned automatically.
     """
     main = Path(main_folder).expanduser().resolve()
     if not main.is_dir():
@@ -119,6 +118,8 @@ def create_experiment_collages(
     if dates_codes is None or dates_display is None:
         raise ValueError('Stage 4 requires dates_codes and dates_display')
     dc, dd = _validate_codes(dates_codes, dates_display, 'dates')
+    if not isinstance(genotypes_as_columns, bool):
+        raise TypeError('genotypes_as_columns must be True or False')
     if not all(isinstance(x, int) and not isinstance(x, bool) and x > 0
                for x in (tile_width, tile_height, per_cell_columns)):
         raise ValueError('tile_width, tile_height and per_cell_columns must be positive integers')
@@ -148,9 +149,12 @@ def create_experiment_collages(
     margin = 10
     title_height = 46
     header_height = 50
-    row_label_width = 180
+    row_displays = ed if genotypes_as_columns else gd
+    column_displays = gd if genotypes_as_columns else ed
+    # Long experiment-condition names are common; adapt the row header width.
+    row_label_width = max(180, int(max(row_font.getlength(s) for s in row_displays)) + 20)
     cell_width = per_cell_columns * tile_width + 12
-    table_width = row_label_width + len(ec) * cell_width
+    table_width = row_label_width + len(column_displays) * cell_width
     tile_text_height = 38
     items = []
     skipped = []
@@ -186,82 +190,104 @@ def create_experiment_collages(
                     skipped.append((rel, status))
     report = pd.DataFrame([row for row, *_ in items])
     write_dataframe_xlsx(report, main / 'object_analysis' / 'experiment_grouping.xlsx')
+    previous_settings_path = main / 'object_analysis' / 'experiment_grouping_config.json'
+    try:
+        previous_settings = json.loads(previous_settings_path.read_text(encoding='utf-8')) if previous_settings_path.is_file() else {}
+    except (ValueError, OSError):
+        previous_settings = {}
+    orientation_changed = bool(previous_settings.get('genotypes_as_columns', False)) != genotypes_as_columns
     settings = dict(genotypes_codes=gc, genotypes_display=gd,
                     environment_codes=ec, environment_display=ed,
                     dates_codes=dc, dates_display=dd,
                     indices=names, tile_width=tile_width, tile_height=tile_height,
                     per_cell_columns=per_cell_columns,
+                    genotypes_as_columns=genotypes_as_columns,
+                    layout_orientation=('genotypes_columns_environments_rows' if genotypes_as_columns
+                                        else 'genotypes_rows_environments_columns'),
                     match_rule='case-insensitive substring in sample folder name',
-                    layout='genotype rows, environment columns, all sample/mask maps in each cell',
+                    layout=('environment rows, genotype columns' if genotypes_as_columns
+                            else 'genotype rows, environment columns') +
+                           ', all sample/mask maps in each cell',
                     sorted_maps_output='object_analysis/by_date/<date>/maps_by_index/<index>/<genotype__environment>/*.png',
                     original_folders_unchanged=True)
     (main / 'object_analysis' / 'experiment_grouping_config.json').write_text(
         json.dumps(settings, ensure_ascii=False, indent=2), encoding='utf-8')
 
+    def cell_indices(row_number, column_number):
+        """Always return (genotype, environment), independent of collage orientation."""
+        if genotypes_as_columns:
+            return column_number, row_number
+        return row_number, column_number
+
     for date_index, date_code in enumerate(dc):
-      collected = _collect_source_maps(dest, items, date_index, date_code, overwrite=overwrite)
-      if collected:
-          print(f'Sorted source maps: {len(collected)} copied for date {dd[date_index]}')
-      for name in names:
-          path = dest/_safe_name(date_code)/'collages'/f'collage_{_safe_name(name)}.png'
-          if path.exists() and not overwrite:
-              print(f'Sorted collage retained: {path.name}')
-              continue
-          groups = {(g, e): [] for g in range(len(gc)) for e in range(len(ec))}
-          for row, gi, ei, di, source in items:
-              if row['index'] == name and gi is not None and ei is not None and di == date_index and source.is_file():
-                  groups[(gi, ei)].append((row, source))
-          heights = []
-          for g in range(len(gc)):
-              max_repeats = max((len(groups[(g, e)]) for e in range(len(ec))), default=0)
-              heights.append(max(1, math.ceil(max_repeats / per_cell_columns)) * tile_height + 15)
-          height = title_height + header_height + sum(heights)
-          if table_width * height > 150_000_000:
-              raise ValueError('Collage is too large; reduce tile_width/tile_height')
-          canvas = Image.new('RGB', (table_width, height), '#ffffff')
-          draw = ImageDraw.Draw(canvas)
-          draw.text((12, 9), f'{name}  |  {dd[date_index]}', font=row_font, fill='#202020')
-          for ei, display in enumerate(ed):
-              x = row_label_width + ei * cell_width
-              draw.rectangle((x, title_height, x + cell_width - 1, title_height + header_height - 1),
-                             outline='#aaaaaa')
-              draw.text((x + 8, title_height + 12), display, font=cell_font, fill='#202020')
-          top = title_height + header_height
-          for gi, display in enumerate(gd):
-              draw.rectangle((0, top, row_label_width - 1, top + heights[gi] - 1), outline='#aaaaaa')
-              draw.text((10, top + 14), display, font=row_font, fill='#202020')
-              draw.text((10, top + 45), f'[{gc[gi]}]', font=misc_font, fill='#555555')
-              for ei in range(len(ec)):
-                  left = row_label_width + ei * cell_width
-                  draw.rectangle((left, top, left + cell_width - 1, top + heights[gi] - 1),
-                                 outline='#cccccc')
-                  group = groups[(gi, ei)]
-                  if not group:
-                      draw.text((left + 18, top + 22), 'No index maps', font=misc_font, fill='#888888')
-                  for position, (row, image_path) in enumerate(group):
-                      col = position % per_cell_columns
-                      r = position // per_cell_columns
-                      x = left + 6 + col * tile_width
-                      y = top + 6 + r * tile_height
-                      with Image.open(image_path) as im:
-                          img = im.convert('RGB')
-                          img.thumbnail((tile_width - 18, tile_height - tile_text_height - 12),
-                                        Image.Resampling.LANCZOS)
-                      canvas.paste(img, (x + (tile_width - img.width)//2,
-                                         y + (tile_height - tile_text_height - img.height)//2))
-                      def fit_label(value):
-                          label = str(value)
-                          while label and draw.textlength(label, font=caption_font) > tile_width - 16:
-                              label = label[:-2] + '…' if len(label) > 2 else ''
-                          return label
-                      draw.text((x + 6, y + tile_height - tile_text_height),
-                                fit_label(f"{row['genotype_display']} / {row['environment_display']}"), font=caption_font, fill='#222222')
-                      draw.text((x + 6, y + tile_height - tile_text_height + 18),
-                                fit_label(f"{row['sample_folder']} / {row['mask']}"), font=caption_font, fill='#555555')
-              top += heights[gi]
-          canvas.save(path, format='PNG', optimize=True)
-          canvas.close()
-          print(f'Sorted collage: {path.name}')
+        collected = _collect_source_maps(dest, items, date_index, date_code, overwrite=overwrite)
+        if collected:
+            print(f'Sorted source maps: {len(collected)} copied for date {dd[date_index]}')
+        for name in names:
+            path = dest / _safe_name(date_code) / 'collages' / f'collage_{_safe_name(name)}.png'
+            if path.exists() and not overwrite and not orientation_changed:
+                print(f'Sorted collage retained: {path.name}')
+                continue
+            groups = {(g, e): [] for g in range(len(gc)) for e in range(len(ec))}
+            for row, gi, ei, di, source in items:
+                if row['index'] == name and gi is not None and ei is not None and di == date_index and source.is_file():
+                    groups[(gi, ei)].append((row, source))
+            heights = []
+            for ri in range(len(row_displays)):
+                max_repeats = max((len(groups[cell_indices(ri, ci)])
+                                   for ci in range(len(column_displays))), default=0)
+                heights.append(max(1, math.ceil(max_repeats / per_cell_columns)) * tile_height + 15)
+            height = title_height + header_height + sum(heights)
+            if table_width * height > 150_000_000:
+                raise ValueError('Collage is too large; reduce tile_width/tile_height')
+            canvas = Image.new('RGB', (table_width, height), '#ffffff')
+            draw = ImageDraw.Draw(canvas)
+            draw.text((12, 9), f'{name}  |  {dd[date_index]}', font=row_font, fill='#202020')
+            for ci, display in enumerate(column_displays):
+                x = row_label_width + ci * cell_width
+                draw.rectangle((x, title_height, x + cell_width - 1, title_height + header_height - 1),
+                               outline='#aaaaaa')
+                draw.text((x + 8, title_height + 12), display, font=cell_font, fill='#202020')
+            top = title_height + header_height
+            for ri, display in enumerate(row_displays):
+                draw.rectangle((0, top, row_label_width - 1, top + heights[ri] - 1), outline='#aaaaaa')
+                draw.text((10, top + 14), display, font=row_font, fill='#202020')
+                code = ec[ri] if genotypes_as_columns else gc[ri]
+                draw.text((10, top + 45), f'[{code}]', font=misc_font, fill='#555555')
+                for ci in range(len(column_displays)):
+                    gi, ei = cell_indices(ri, ci)
+                    left = row_label_width + ci * cell_width
+                    draw.rectangle((left, top, left + cell_width - 1, top + heights[ri] - 1),
+                                   outline='#cccccc')
+                    group = groups[(gi, ei)]
+                    if not group:
+                        draw.text((left + 18, top + 22), 'No index maps', font=misc_font, fill='#888888')
+                    for position, (row, image_path) in enumerate(group):
+                        col = position % per_cell_columns
+                        r = position // per_cell_columns
+                        x = left + 6 + col * tile_width
+                        y = top + 6 + r * tile_height
+                        with Image.open(image_path) as im:
+                            img = im.convert('RGB')
+                            img.thumbnail((tile_width - 18, tile_height - tile_text_height - 12),
+                                          Image.Resampling.LANCZOS)
+                        canvas.paste(img, (x + (tile_width - img.width)//2,
+                                           y + (tile_height - tile_text_height - img.height)//2))
+                        def fit_label(value):
+                            label = str(value)
+                            while label and draw.textlength(label, font=caption_font) > tile_width - 16:
+                                label = label[:-2] + '…' if len(label) > 2 else ''
+                            return label
+                        draw.text((x + 6, y + tile_height - tile_text_height),
+                                  fit_label(f"{row['genotype_display']} / {row['environment_display']}"),
+                                  font=caption_font, fill='#222222')
+                        draw.text((x + 6, y + tile_height - tile_text_height + 18),
+                                  fit_label(f"{row['sample_folder']} / {row['mask']}"),
+                                  font=caption_font, fill='#555555')
+                top += heights[ri]
+            canvas.save(path, format='PNG', optimize=True)
+            canvas.close()
+            print(f'Sorted collage: {path.name}')
     if skipped:
         unique = sorted(set(skipped))
         print(f'WARNING: {len(unique)} sample folder(s) cannot be classified by given codes:')

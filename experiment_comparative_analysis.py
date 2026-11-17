@@ -189,7 +189,8 @@ def analyze_experiment_by_date(main_folder, *,
         environment_codes, environment_display,
         dates_codes, dates_display,
         indices=None, spectral_variant=None, pca_scaling='center',
-        create_collages=True, per_cell_columns=2, overwrite=True):
+        create_collages=True, per_cell_columns=2, overwrite=True,
+        genotypes_as_columns=False):
     """Create date-specific collages, object PCA, spectra ± SD, index box+scatter.
 
     Stage 3 must already exist. The user-defined object mask is the descriptive
@@ -231,7 +232,8 @@ def analyze_experiment_by_date(main_folder, *,
     if create_collages:
         create_experiment_collages(main,genotypes_codes=gc,genotypes_display=gd,
             environment_codes=ec,environment_display=ed,dates_codes=dc,dates_display=dd,
-            indices=collage_names,per_cell_columns=per_cell_columns,overwrite=overwrite)
+            indices=collage_names,per_cell_columns=per_cell_columns,overwrite=overwrite,
+            genotypes_as_columns=genotypes_as_columns)
     base=out/'by_date'
     base.mkdir(exist_ok=True,parents=True)
     summary=[]
@@ -261,7 +263,8 @@ def analyze_experiment_by_date(main_folder, *,
         'stage3_completed_utc':stage3.get('stage3_completed_utc'),
         'stage4_stale_after_stage3_rerun':False,
         'stage':'date-wise experimental comparison',
-        'spectral_variant':spectral_variant,'genotypes_codes':gc,'genotypes_display':gd,
+        'spectral_variant':spectral_variant,'genotypes_as_columns':genotypes_as_columns,
+        'genotypes_codes':gc,'genotypes_display':gd,
         'environment_codes':ec,'environment_display':ed,
         'dates_codes':dc,'dates_display':dd,
         'independence_warning':'Mask/object rows and pixels are NOT automatically independent biological replicates.',
