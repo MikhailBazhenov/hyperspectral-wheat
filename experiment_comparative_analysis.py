@@ -7,6 +7,7 @@ logged. No implicit inference of experimental design or replicate independence.
 from __future__ import annotations
 from pathlib import Path
 import json
+import shutil
 import warnings
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from simple_xlsx import read_dataframe_xlsx, write_dataframe_xlsx
 from create_experiment_collages import (
-    _match_code, _validate_codes, _safe_name, create_experiment_collages)
+    _match_code, _match_date_code, _validate_codes, _safe_name, create_experiment_collages)
 from spectral_preprocessing import SPECTRAL_VARIANTS
 
 
@@ -40,9 +41,12 @@ def _classify(objects, gc,gd,ec,ed,dc,dd):
         basename=Path(source).name
         g,gl,gs=_labels(basename,gc,gd)
         e,el,es=_labels(basename,ec,ed)
-        d,dl,ds=_labels(basename,dc,dd)
+        session_name=str(getattr(item, 'session', '') or '')
+        date_i,ds=_match_date_code(basename,session_name,dc)
+        d=dc[date_i] if date_i is not None else ''
+        dl=dd[date_i] if date_i is not None else '' 
         status='ok' if gs==es==ds=='ok' else f'genotype_{gs};environment_{es};date_{ds}'
-        rows.append(dict(object=str(item.object),sample=source,mask=str(item.mask),
+        rows.append(dict(object=str(item.object),sample=source,session=session_name,mask=str(item.mask),
             genotype_code=g,genotype_display=gl,
             environment_code=e,environment_display=el,
             date_code=d,date_display=dl,status=status))
@@ -184,45 +188,256 @@ def _pca_by_date(group, spectra, date_display, folder, scaling='center'):
             folder/'objects_pca_loadings.xlsx')
 
 
+
+def _prepare_project_sessions(project_root, session_folders, requested_variant, requested_indices):
+    """Validate and merge Stage 3 tables WITHOUT modifying any source session.
+
+    All joined object IDs receive the session name as a prefix. Spectra are
+    required to have the same actual wavelength grid; otherwise PCA and mean
+    curves could silently compare different bands. Formula mismatch also fails.
+    """
+    project_root = Path(project_root).expanduser().resolve()
+    sessions = []
+    for folder in session_folders:
+        path = Path(folder).expanduser().resolve()
+        if not path.is_dir() or path.parent != project_root:
+            raise ValueError(f'Expected a direct subfolder of project root: {path}')
+        if path.name.casefold() == 'results':
+            raise ValueError('Results/ cannot be used as an acquisition session')
+        if path not in sessions:
+            sessions.append(path)
+    if not sessions:
+        raise ValueError('session_folders is empty')
+    if len({s.name.casefold() for s in sessions}) != len(sessions):
+        raise ValueError('Session folder names collide case-insensitively')
+
+    object_frames, index_frames, spectra_frames, inventory = [], [], [], []
+    sample_folders = []
+    selected_reference = None
+    reference_grid = None
+    variant = requested_variant
+    include_color = False
+    color_names = set()
+    for session in sessions:
+        data_dir = session / 'object_analysis'
+        settings_file = data_dir / 'analysis_settings.json'
+        if not settings_file.is_file():
+            raise FileNotFoundError(f'Stage 3 results missing for session {session.name}: {settings_file}')
+        settings = json.loads(settings_file.read_text(encoding='utf-8'))
+        if variant is None:
+            variant = str(settings.get('spectral_variant', ''))
+        if variant not in SPECTRAL_VARIANTS:
+            raise ValueError(f'Unsupported mean-spectrum variant {variant!r}')
+        if settings.get('spectral_variant') != variant:
+            raise ValueError(f'{session.name}: Stage 3 used {settings.get("spectral_variant")!r}, '
+                             f'not {variant!r}. Rerun Stage 3 consistently.')
+        objects = read_dataframe_xlsx(data_dir / 'objects.xlsx')
+        indices = read_dataframe_xlsx(data_dir / 'indices_selected.xlsx')
+        spectra = read_dataframe_xlsx(data_dir / f'spectra_mean_{variant}.xlsx')
+        selected = read_dataframe_xlsx(data_dir / 'selected_indices.xlsx')
+        for col in ('object', 'sample', 'mask'):
+            if col not in objects.columns:
+                raise ValueError(f'{session.name}/objects.xlsx lacks column {col}')
+        if 'sample' not in indices.columns or 'wavelength' not in spectra.columns:
+            raise ValueError(f'{session.name}: malformed index or spectral table')
+        if not {'index', 'formula'}.issubset(selected.columns):
+            raise ValueError(f'{session.name}: selected_indices.xlsx must contain index/formula')
+        definitions = dict(zip(selected['index'].astype(str), selected['formula'].astype(str)))
+        if requested_indices is None:
+            names = list(definitions) if selected_reference is None else list(selected_reference)
+        else:
+            names = list(dict.fromkeys(str(n) for n in requested_indices))
+        missing = [n for n in names if n not in definitions or n not in indices.columns]
+        if missing:
+            raise ValueError(f'{session.name}: requested indices absent from Stage 3: {missing}')
+        if selected_reference is None:
+            selected_reference = {name: definitions[name] for name in names}
+        else:
+            mismatched = [name for name in names if definitions[name] != selected_reference.get(name)]
+            if mismatched:
+                raise ValueError(f'{session.name}: inconsistent formula definitions for {mismatched}')
+        wl = spectra['wavelength'].to_numpy(float)
+        if not np.isfinite(wl).all() or not np.all(np.diff(wl) > 0):
+            raise ValueError(f'{session.name}: invalid wavelength grid')
+        if reference_grid is None:
+            reference_grid = wl
+        elif len(wl) != len(reference_grid) or not np.allclose(wl, reference_grid, rtol=0, atol=1e-7):
+            raise ValueError(f'{session.name}: wavelength grid differs across sessions; '
+                             'regenerate comparable Stage 3 spectra before pooled PCA')
+
+        objects = objects.copy()
+        indices = indices.copy()
+        spectra = spectra.copy()
+        old_ids = objects['object'].astype(str)
+        old_samples = objects['sample'].astype(str)
+        if old_ids.duplicated().any():
+            raise ValueError(f'{session.name}: duplicated object IDs')
+        if indices['sample'].astype(str).duplicated().any():
+            raise ValueError(f'{session.name}: duplicated index rows')
+        ids = set(old_ids)
+        if not ids.issubset(set(indices['sample'].astype(str))):
+            raise ValueError(f'{session.name}: index table is missing objects')
+        source_columns = [c for c in spectra.columns if c != 'wavelength']
+        if not ids.issubset(set(map(str, source_columns))):
+            raise ValueError(f'{session.name}: spectral table is missing objects')
+        objects['session'] = session.name
+        objects['object'] = session.name + '/' + old_ids
+        objects['sample'] = session.name + '/' + old_samples
+        indices['session'] = session.name
+        indices['sample'] = session.name + '/' + indices['sample'].astype(str)
+        spectra = spectra.rename(columns={c: session.name + '/' + str(c) for c in source_columns})
+        if len(spectra_frames):
+            spectra = spectra.drop(columns='wavelength')
+        object_frames.append(objects)
+        index_frames.append(indices)
+        spectra_frames.append(spectra)
+        from hyperspectral_object_analysis import find_samples
+        session_samples = find_samples(session)
+        sample_folders.extend(session_samples)
+        color_name = str(settings.get('color_image_name') or 'Color_RGB')
+        include_color |= bool(settings.get('render_color_images'))
+        if settings.get('render_color_images'):
+            color_names.add(color_name)
+        inventory.append({'session':session.name,'source_path':str(session),
+                          'stage3_completed_utc':settings.get('stage3_completed_utc',''),
+                          'spectral_variant':variant,'n_objects':len(objects),
+                          'n_samples':len(session_samples),
+                          'color_images':bool(settings.get('render_color_images'))})
+    if len(color_names)>1:
+        raise ValueError(f'Inconsistent RGB output names across sessions: {sorted(color_names)}')
+    merged_objects = pd.concat(object_frames, ignore_index=True)
+    merged_indices = pd.concat(index_frames, ignore_index=True)
+    merged_spectra = pd.concat(spectra_frames, axis=1)
+    if merged_objects['object'].duplicated().any() or merged_indices['sample'].duplicated().any():
+        raise ValueError('Duplicate session-qualified object IDs; refusing to merge')
+    # Reorder to display each wavelength once, followed by all objects.
+    color_name = next(iter(color_names)) if color_names else 'Color_RGB'
+    return dict(sessions=sessions, objects=merged_objects, indices=merged_indices,
+                spectra=merged_spectra, names=list(selected_reference),
+                selected=selected_reference, inventory=pd.DataFrame(inventory),
+                sample_folders=sample_folders, spectral_variant=variant,
+                include_color=include_color, color_name=color_name)
+
+
+def _copy_session_results(sessions, results_root, overwrite=True):
+    """Copy original Stage 3 object_analysis into Results/by_session, unchanged."""
+    archive_root = results_root / 'by_session'
+    archive_root.mkdir(parents=True, exist_ok=True)
+    for session in sessions:
+        source = session / 'object_analysis'
+        target = archive_root / session.name
+        # Do not traverse symlinks: a symlink can escape an acquisition session.
+        if any(path.is_symlink() for path in source.rglob('*')):
+            raise ValueError(f'Symlinks are not supported inside {source}')
+        if target.exists():
+            if not overwrite:
+                print(f'Session copy reused: {target}')
+                continue
+            if target.is_symlink() or not target.is_dir():
+                raise ValueError(f'Unexpected by_session destination: {target}')
+            shutil.rmtree(target)
+        shutil.copytree(source, target)
+        print(f'Session results copied: {session.name}')
+
+
 def analyze_experiment_by_date(main_folder, *,
         genotypes_codes, genotypes_display,
         environment_codes, environment_display,
         dates_codes, dates_display,
         indices=None, spectral_variant=None, pca_scaling='center',
         create_collages=True, per_cell_columns=2, overwrite=True,
-        genotypes_as_columns=False):
-    """Create date-specific collages, object PCA, spectra ± SD, index box+scatter.
+        genotypes_as_columns=False, session_folders=None):
+    """Date-wise comparisons with optional project-wide session aggregation.
 
-    Stage 3 must already exist. The user-defined object mask is the descriptive
-    observation; it is NOT claimed to be an independent plant/biological repeat.
+    With session_folders=None, retains legacy per-session Stage 4 behavior.
+    With a nonempty list, main_folder is the CODE/NOTEBOOK project root and
+    sessions must be its direct child folders. Stage 3 outputs are pooled with
+    unique session-qualified IDs, and output goes to Results/by_date and
+    Results/by_session. All copied session data remain unchanged in source.
+    The object mask is NOT automatically an independent biological replicate.
     """
     main=Path(main_folder).expanduser().resolve()
-    out=main/'object_analysis'
     gc,gd=_validate_codes(genotypes_codes,genotypes_display,'genotypes')
     ec,ed=_validate_codes(environment_codes,environment_display,'environment')
     dc,dd=_validate_codes(dates_codes,dates_display,'dates')
-    settings_path=out/'analysis_settings.json'
-    if not settings_path.exists():raise FileNotFoundError('Stage 3 settings missing; run Stage 3 first')
-    stage3=json.loads(settings_path.read_text(encoding='utf-8'))
-    if spectral_variant is None:spectral_variant=stage3['spectral_variant']
-    if spectral_variant not in SPECTRAL_VARIANTS:raise ValueError('Invalid spectral_variant')
-    if spectral_variant!=stage3['spectral_variant']:
-        raise ValueError('Stage 4 variant differs from Stage 3; rerun Stage 3 with that variant')
-    objects=read_dataframe_xlsx(out/'objects.xlsx')
-    spectra_frame=read_dataframe_xlsx(out/f'spectra_mean_{spectral_variant}.xlsx')
+    if len({_safe_name(code) for code in dc}) != len(dc):
+        raise ValueError('Date codes produce duplicate output folder names after sanitization')
+    if session_folders is not None:
+        # Project-wide mode: read Stage 3 from ALL acquisition sessions, then
+        # write one date-wise analysis and one complete archive per session.
+        merged = _prepare_project_sessions(main, session_folders, spectral_variant, indices)
+        out = main / 'Results'
+        if out.is_symlink():
+            raise ValueError('Results directory must not be a symlink')
+        out.mkdir(parents=True, exist_ok=True)
+        if (out / 'by_session').is_symlink():
+            raise ValueError('Results/by_session must not be a symlink')
+        if overwrite and ((out/'by_date').exists() or (out/'by_session').exists()):
+            marker = out/'experiment_comparison_config.json'
+            if not marker.is_file():
+                raise ValueError('Existing Results contain by_date/by_session without a pipeline marker; '
+                                 'move or rename them before allowing overwrite')
+            try:
+                previous = json.loads(marker.read_text(encoding='utf-8'))
+            except (ValueError, OSError) as exc:
+                raise ValueError(f'Cannot validate existing Results metadata: {exc}') from exc
+            if previous.get('output_mode') != 'project_aggregated':
+                raise ValueError('Existing Results were not created by project-wide Stage 4; refusing overwrite')
+        objects = merged['objects']
+        index_frame = merged['indices']
+        spectra_frame = merged['spectra']
+        selected_names = merged['names']
+        spectral_variant = merged['spectral_variant']
+        stage3 = {'spectral_variant':spectral_variant,
+                  'render_color_images':merged['include_color'],
+                  'color_image_name':merged['color_name']}
+        if overwrite and (out/'by_date').exists():
+            if (out/'by_date').is_symlink():
+                raise ValueError('Refusing to overwrite symlink Results/by_date')
+            shutil.rmtree(out/'by_date')
+        _copy_session_results(merged['sessions'], out, overwrite=overwrite)
+        write_dataframe_xlsx(objects, out/'objects.xlsx')
+        write_dataframe_xlsx(index_frame, out/'indices_selected.xlsx')
+        write_dataframe_xlsx(spectra_frame, out/f'spectra_mean_{spectral_variant}.xlsx')
+        write_dataframe_xlsx(pd.DataFrame([
+            {'index':n,'formula':formula} for n,formula in merged['selected'].items()]),
+            out/'selected_indices.xlsx')
+        write_dataframe_xlsx(merged['inventory'], out/'sessions.xlsx')
+        sample_folders = merged['sample_folders']
+        stage3_sources = merged['inventory'].to_dict(orient='records')
+    else:
+        # Backwards-compatible single-acquisition mode.
+        out=main/'object_analysis'
+        settings_path=out/'analysis_settings.json'
+        if not settings_path.exists():
+            raise FileNotFoundError('Stage 3 settings missing; run Stage 3 first')
+        stage3=json.loads(settings_path.read_text(encoding='utf-8'))
+        if spectral_variant is None:
+            spectral_variant=stage3['spectral_variant']
+        if spectral_variant not in SPECTRAL_VARIANTS:
+            raise ValueError('Invalid spectral_variant')
+        if spectral_variant!=stage3['spectral_variant']:
+            raise ValueError('Stage 4 variant differs from Stage 3; rerun Stage 3 with that variant')
+        objects=read_dataframe_xlsx(out/'objects.xlsx')
+        spectra_frame=read_dataframe_xlsx(out/f'spectra_mean_{spectral_variant}.xlsx')
+        index_frame=read_dataframe_xlsx(out/'indices_selected.xlsx')
+        selected=read_dataframe_xlsx(out/'selected_indices.xlsx')
+        selected_names=list(selected['index']) if indices is None else list(dict.fromkeys(indices))
+        sample_folders = None
+        stage3_sources = [dict(session=main.name,
+                               stage3_completed_utc=stage3.get('stage3_completed_utc',''))]
     spectra=spectra_frame.set_index('wavelength')
     spectra=spectra.apply(pd.to_numeric,errors='coerce')
     spectra.index=spectra.index.astype(float)
-    index_frame=read_dataframe_xlsx(out/'indices_selected.xlsx')
-    selected=read_dataframe_xlsx(out/'selected_indices.xlsx')
-    names=list(selected['index']) if indices is None else list(dict.fromkeys(indices))
+    names=list(selected_names)
     collage_names = list(names)
     if stage3.get('render_color_images'):
         color_name = str(stage3.get('color_image_name') or 'Color_RGB')
         if color_name not in collage_names:
             collage_names.append(color_name)
     missing=[n for n in names if n not in index_frame.columns]
-    if missing:raise ValueError(f'Selected index tables are missing {missing}; rerun Stage 3')
+    if missing:
+        raise ValueError(f'Selected index tables are missing {missing}; rerun Stage 3')
     classification=_classify(objects,gc,gd,ec,ed,dc,dd)
     write_dataframe_xlsx(classification,out/'experiment_objects.xlsx')
     unclassified=classification[classification.status!='ok']
@@ -233,7 +448,9 @@ def analyze_experiment_by_date(main_folder, *,
         create_experiment_collages(main,genotypes_codes=gc,genotypes_display=gd,
             environment_codes=ec,environment_display=ed,dates_codes=dc,dates_display=dd,
             indices=collage_names,per_cell_columns=per_cell_columns,overwrite=overwrite,
-            genotypes_as_columns=genotypes_as_columns)
+            genotypes_as_columns=genotypes_as_columns,
+            sample_folders=sample_folders,
+            output_folder=out)
     base=out/'by_date'
     base.mkdir(exist_ok=True,parents=True)
     summary=[]
@@ -255,12 +472,16 @@ def analyze_experiment_by_date(main_folder, *,
             _plot_index_boxscatter(group,index_frame,name,gd,ed,display,
                                    path/f'{_safe_name(name)}.png')
         summary.append(dict(date_code=date,date_display=display,n_object_masks=len(group),
-                            n_samples=group['sample'].nunique(),n_indices=len(names),
+                            n_samples=group['sample'].nunique(),
+                            n_sessions=group['session'].nunique(), n_indices=len(names),
                             spectrum_variant=spectral_variant))
         print(f'Completed date {display}: {len(group)} object masks, {len(names)} index plots')
     from datetime import datetime,timezone
     manifest={'stage4_completed_utc':datetime.now(timezone.utc).isoformat(),
+        'stage3_sources':stage3_sources,
         'stage3_completed_utc':stage3.get('stage3_completed_utc'),
+        'output_mode':'project_aggregated' if session_folders is not None else 'single_session',
+        'results_root':str(out),
         'stage4_stale_after_stage3_rerun':False,
         'stage':'date-wise experimental comparison',
         'spectral_variant':spectral_variant,'genotypes_as_columns':genotypes_as_columns,

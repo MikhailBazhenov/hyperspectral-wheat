@@ -55,6 +55,20 @@ def _match_code(sample_name, codes):
 def _safe_name(name):
     return re.sub(r'[^A-Za-z0-9_-]+', '_', name).strip('_') or 'index'
 
+
+def _match_date_code(sample_name, session_name, date_codes):
+    """Match the sample date first, falling back to the acquisition session.
+
+    A session can contain multiple dates: an explicit date in the sample name
+    always takes precedence. Missing or ambiguous matches are not guessed.
+    """
+    index, status = _match_code(str(sample_name), date_codes)
+    if status == 'ok' or status == 'ambiguous':
+        return index, status
+    if session_name:
+        return _match_code(str(session_name), date_codes)
+    return None, 'unmatched'
+
 def _safe_path_label(name):
     name = str(name).strip()
     name = re.sub(r'[\/:*?"<>|]+', '_', name)
@@ -67,8 +81,14 @@ def _variant_folder_name(row):
 
 
 def _collected_map_destination(base_folder, row):
-    filename = f"{_safe_path_label(row['sample_folder'])}__{_safe_path_label(row['mask'])}.png"
-    return (base_folder / _safe_name(row['index']) / _variant_folder_name(row) / filename)
+    # Session-qualified, collision-resistant paths. Identical sample and mask
+    # folder names are common in separate acquisition sessions.
+    import hashlib
+    relative_sample = str(row['sample'])
+    digest = hashlib.sha1(relative_sample.encode('utf-8')).hexdigest()[:10]
+    label = _safe_path_label(relative_sample.replace('/', '__'))
+    filename = f"{label}__{_safe_path_label(row['mask'])}__{digest}.png"
+    return base_folder / _safe_name(row['index']) / _variant_folder_name(row) / filename
 
 
 def _collect_source_maps(dest_root, items, date_index, date_code, overwrite=True):
@@ -102,6 +122,8 @@ def create_experiment_collages(
     per_cell_columns=2,
     overwrite=True,
     genotypes_as_columns=False,
+    sample_folders=None,
+    output_folder=None,
 ):
     """Create date-wise sorted collages, optionally transposing the layout.
 
@@ -123,7 +145,12 @@ def create_experiment_collages(
     if not all(isinstance(x, int) and not isinstance(x, bool) and x > 0
                for x in (tile_width, tile_height, per_cell_columns)):
         raise ValueError('tile_width, tile_height and per_cell_columns must be positive integers')
-    samples = find_samples(main)
+    # Legacy single-session calls still discover samples locally. Project-wide
+    # Stage 4 passes the explicit list of sample folders and a Results folder.
+    samples = find_samples(main) if sample_folders is None else sorted(
+        (Path(p).expanduser().resolve() for p in sample_folders), key=lambda p: str(p).casefold())
+    if any(not p.is_relative_to(main) for p in samples):
+        raise ValueError('Every sample folder must be inside the project root')
     if not samples:
         raise FileNotFoundError('No corrected cubes / sample folders found')
     if indices is None:
@@ -134,7 +161,9 @@ def create_experiment_collages(
         names = list(dict.fromkeys(indices))
     if not names:
         raise ValueError('No index maps found; execute Stage 3 first')
-    dest = main / 'object_analysis' / 'by_date'
+    report_root = (main / 'object_analysis') if output_folder is None else Path(output_folder).expanduser().resolve()
+    report_root.mkdir(parents=True, exist_ok=True)
+    dest = report_root / 'by_date'
     dest.mkdir(parents=True, exist_ok=True)
     for date_code in dc:
         folder=dest/_safe_name(date_code)/'collages'
@@ -162,7 +191,8 @@ def create_experiment_collages(
         rel = sample.relative_to(main).as_posix()
         gi, gs = _match_code(sample.name, gc)
         ei, es = _match_code(sample.name, ec)
-        di, ds = _match_code(sample.name, dc)
+        session_name = sample.relative_to(main).parts[0] if sample_folders is not None else ''
+        di, ds = _match_date_code(sample.name, session_name, dc)
         status = 'ok' if gs == es == ds == 'ok' else f'genotype_{gs};environment_{es};date_{ds}'
         maps_dir = sample / 'object_analysis' / 'index_maps'
         masks = sorted((p for p in maps_dir.iterdir() if p.is_dir()), key=lambda p: p.name.casefold()) \
@@ -172,7 +202,7 @@ def create_experiment_collages(
         for mask_folder in masks:
             for name in names:
                 source = mask_folder / f'{name}.png'
-                row = dict(sample=rel, sample_folder=sample.name, mask=mask_folder.name,
+                row = dict(sample=rel, session=session_name, sample_folder=sample.name, mask=mask_folder.name,
                            genotype_code=gc[gi] if gi is not None else '',
                            genotype_display=gd[gi] if gi is not None else '',
                            environment_code=ec[ei] if ei is not None else '',
@@ -189,8 +219,8 @@ def create_experiment_collages(
                 if status != 'ok':
                     skipped.append((rel, status))
     report = pd.DataFrame([row for row, *_ in items])
-    write_dataframe_xlsx(report, main / 'object_analysis' / 'experiment_grouping.xlsx')
-    previous_settings_path = main / 'object_analysis' / 'experiment_grouping_config.json'
+    write_dataframe_xlsx(report, report_root / 'experiment_grouping.xlsx')
+    previous_settings_path = report_root / 'experiment_grouping_config.json'
     try:
         previous_settings = json.loads(previous_settings_path.read_text(encoding='utf-8')) if previous_settings_path.is_file() else {}
     except (ValueError, OSError):
@@ -208,9 +238,10 @@ def create_experiment_collages(
                     layout=('environment rows, genotype columns' if genotypes_as_columns
                             else 'genotype rows, environment columns') +
                            ', all sample/mask maps in each cell',
-                    sorted_maps_output='object_analysis/by_date/<date>/maps_by_index/<index>/<genotype__environment>/*.png',
+                    sorted_maps_output='by_date/<date>/maps_by_index/<index>/<genotype__environment>/<session>__<sample>__<mask>.png',
+                    output_directory=str(report_root),
                     original_folders_unchanged=True)
-    (main / 'object_analysis' / 'experiment_grouping_config.json').write_text(
+    (report_root / 'experiment_grouping_config.json').write_text(
         json.dumps(settings, ensure_ascii=False, indent=2), encoding='utf-8')
 
     def cell_indices(row_number, column_number):

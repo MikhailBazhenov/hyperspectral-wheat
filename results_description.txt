@@ -1,0 +1,985 @@
+RESULTS DESCRIPTION FOR AI AGENTS
+Wheat hyperspectral imaging pipeline — project-wide, multi-session Stage 4
+Universal data dictionary and interpretation guide (not tied to any experiment)
+===============================================================================
+
+PURPOSE
+-------
+This document explains the meaning, provenance, structure, relationships, and
+scientific limitations of output files produced by the current wheat
+hyperspectral imaging pipeline. It is intended to accompany a Results/ folder
+when its contents are given to a language model or an automated data-analysis
+agent. It describes the software's output schema; it contains NO experimental
+observations, measured effects, or conclusions about a particular dataset.
+
+The actual files are the authority for which objects, indices, dates, groups,
+measurements, and figures exist. Not every listed file is necessarily present:
+optional processing stages, user settings, quality checks, and sample counts
+can change the outputs. Some directories may contain artifacts retained from
+older runs or pipeline versions; read the available configuration files and
+verify file timestamps/provenance rather than assuming every file is current.
+
+This description is based on the project-wide Stage 4 implementation that
+merges results from multiple acquisition sessions and on the Stage 3 object
+analysis modules (including mean-normalized spectra, spectral indices, pixel
+histograms, colorimetric RGB, and date-wise plots).
+
+1. CONCEPTS AND LEVELS OF ANALYSIS
+----------------------------------
+PROJECT: The root directory containing Python modules, Jupyter notebook, and
+         one or more acquisition-session directories. Its pooled outputs are
+         written to PROJECT/Results/.
+
+SESSION / ACQUISITION SESSION: One camera acquisition and calibration context,
+         generally a direct subdirectory of the project. A session may contain
+         samples from one date or multiple dates. Different sessions may contain
+         samples from the same date.
+
+SAMPLE: A recorded subject/image stack, ordinarily a sample folder under a
+        session, with its own calibrated hyperspectral cube.
+
+OBJECT / MASK: An analyzed spatial region of a sample. One sample may have
+        multiple object masks; these are NOT assumed to be independent plants
+        or independent biological replicates.
+
+DATE: An observation-date category specified by the user as dates_codes and
+      dates_display. It is an experimental factor and is NOT necessarily the
+      session date. A date code is sought first in a sample folder name; if
+      unmatched there, the session folder name is checked. Ambiguous matches
+      are not assigned automatically.
+
+GENOTYPE: Experimental factor derived from genotypes_codes and associated
+          human-readable genotypes_display labels.
+
+ENVIRONMENT: Experimental treatment/condition derived from environment_codes
+             and associated environment_display labels.
+
+INDEX: A numerical spectral descriptor (e.g., NDVI, EWRI_410_900, Hue_LCh).
+       'Index of the object mean spectrum' and 'mean/variation of pixelwise
+       index values' are DIFFERENT statistical quantities.
+
+SPECTRAL VARIANT: One of raw, raw_normalized, savgol, savgol_normalized.
+       The active variant determines object-level selected-index calculations
+       and the date-wise PCA and mean-spectra comparisons.
+
+THE CRITICAL ID RULE:
+  Within an acquisition session, an object ID is typically
+      <relative-sample-path>::<mask-id>
+  In pooled Results, the session folder name is prepended:
+      <session-name>/<relative-sample-path>::<mask-id>
+  A pooled sample ID is usually:
+      <session-name>/<relative-sample-path>
+  These strings are opaque identifiers: use exact matches, do not split them
+  casually, and do not collapse same-named samples from different sessions.
+
+2. GENERAL FOLDER TREE
+----------------------
+PROJECT/
+  Session_A/
+    object_analysis/                # session-level Stage 3 summaries
+    Sample_01/
+      corrected_images/             # calibrated cube (outside Results)
+      masks/                        # optional region masks (outside Results)
+      object_analysis/index_maps/<mask-id>/<INDEX>.png
+      object_analysis/index_maps/<mask-id>/Color_RGB.png  # optional
+      pca_maps/                     # optional spatial PCA (outside Results)
+    ...
+  Session_B/
+    object_analysis/
+    ...
+  Results/
+    experiment_comparison_config.json
+    experiment_grouping_config.json         # when collages are created
+    sessions.xlsx                           # pooled mode
+    objects.xlsx
+    selected_indices.xlsx
+    indices_selected.xlsx
+    spectra_mean_<active_variant>.xlsx
+    experiment_objects.xlsx
+    experiment_grouping.xlsx               # when collages are created
+    experiment_comparison_summary.xlsx     # if there are date results
+    by_session/
+      Session_A/
+        [copy of CONTENTS of Session_A/object_analysis/]
+      Session_B/
+        [copy of CONTENTS of Session_B/object_analysis/]
+      ...
+    by_date/
+      <date-code>/
+        index_observations.xlsx
+        group_spectrum_stats.xlsx
+        spectra_by_genotype_environment.png
+        index_boxplots/
+          <INDEX>.png
+          ...
+        pca/
+          objects_pca.png
+          objects_pca_scores.xlsx
+          objects_pca_variance.xlsx
+          objects_pca_loadings.xlsx
+          objects_pca_cluster_diagnostics.xlsx  # optional
+        collages/                            # optional
+          collage_<INDEX>.png
+          collage_Color_RGB.png              # optional
+        maps_by_index/                       # optional
+          <INDEX>/
+            <genotype-display>__<environment-display>/
+              <session-and-sample>__<mask>__<hash>.png
+          Color_RGB/                         # optional
+            <genotype-display>__<environment-display>/
+              <session-and-sample>__<mask>__<hash>.png
+      ...
+
+The shown tree illustrates possible contents, NOT files guaranteed to exist.
+The by_session copies preserve only the content of each session's root
+object_analysis/ folder. In particular, source PNG maps stored INSIDE a sample
+folder at Sample_01/object_analysis/index_maps/ are outside that copied root
+folder; selected maps are collected separately in Results/by_date/... only
+when collage/map collection is enabled.
+
+3. HOW THE FILES WERE PRODUCED
+------------------------------
+Stage 1 / calibration: Read hyperspectral band images (e.g., 400..1000 nm),
+perform configured dark subtraction, spatial registration (ArUco-based when
+used), spatial flat-field correction, and Spectralon reference normalization.
+An optional scalar aperture/iris correction is used when plant and reference
+exposures were obtained with different iris settings and valid paired open/closed
+calibration images are available. Values in calibrated cubes are apparent or
+relative reflectance under the assumptions of the acquisition method; not an
+independently traceable absolute-reflectance measurement. The acquisition
+wavelength grid and calibration options must be checked at their sources.
+
+Stage 2 / segmentation: Create or edit masks with available segmentation
+methods, thresholding, or interactive tools. Segmentation RGB preview images
+can be generated quickly from three bands or colorimetrically from the
+calibrated visible spectrum. HSV hue used for threshold masks is unrelated to
+the CIELCh Hue_LCh derived from spectra.
+
+Stage 3 / per-session object analysis: For each selected mask, calculate a mean
+spectral value at each wavelength across valid pixels, per-band standard
+deviation and pixel count, Savitzky-Golay smoothing, and individual spectrum
+mean normalization. Compute the selected spectral indices from EACH OBJECT'S
+MEAN SPECTRUM, not by averaging pixel-index values. Independently calculate
+index maps from the calibrated PER-PIXEL RAW spectral cube, summarize their
+observed values and equal-width histograms, and optionally produce
+colorimetric sRGB images and spatial PCA maps. Store per-session tables in
+Session/object_analysis/ and maps inside sample folders.
+
+Stage 4 / project-wide analysis: Read Stage 3 results from all requested
+sessions; require compatible wavelength grids, active spectral variants, and
+formulas for the chosen indices; attach session-qualified IDs; pool the
+object-level data; classify objects by genotype/environment/date codes; create
+per-date spectra, index plots, PCA, collages, and sorted PNG collections.
+Copy each session's object_analysis root folder to Results/by_session/.
+Original session folders are not moved or renamed by this stage.
+
+Stage 4 is primarily DESCRIPTIVE. Its boxplots, plotted points, PCA, cluster
+labels, and mean +/- SD summaries do not by themselves establish treatment
+significance, reproducibility, causal effects, or independent replication.
+
+4. PROJECT-LEVEL RESULTS: FILE-BY-FILE DICTIONARY
+------------------------------------------------
+All .xlsx files generated by the pipeline use a simple Excel workbook with a
+single worksheet named 'Data', a header row, no formulas, and unstyled cells.
+Numerical missing values (NaN/Inf) are generally empty cells; read them as
+missing, not zero. Some fields may be text strings. Row order is not a stable
+biological grouping, and column order is not a scientific ranking.
+
+Results/experiment_comparison_config.json
+  Provenance and Stage 4 settings. Typical keys:
+    output_mode: 'project_aggregated' for the multi-session workflow
+    stage: description of Stage 4
+    results_root: path where outputs were written (possibly stale after moving)
+    stage4_completed_utc: timestamp of the comparative run
+    stage3_sources: list of sessions and their Stage 3 completion metadata
+    spectral_variant: active object spectrum variant
+    genotypes_as_columns: collage orientation flag
+    genotypes_codes/display: technical codes and plot labels
+    environment_codes/display: technical codes and plot labels
+    dates_codes/display: technical date codes and plot labels
+    mean_spectra_statistics, index_observations, colour_hue, pca:
+      notes on calculations and interpretation
+    stage4_stale_after_stage3_rerun: validity advisory flag
+  Check this FIRST. An actual Stage 3 rerun may invalidate older Stage 4 output
+  even if the flag has not yet been changed in a project-level copy.
+
+Results/experiment_grouping_config.json
+  Created when collage generation runs. Explains codes, display labels, chosen
+  image types, cell dimensions, genotype orientation, map-copy location, and
+  matching rules. genotypes_as_columns=False means genotype rows and
+  environment columns; True transposes that layout. This concerns figures,
+  not statistical grouping or data values.
+
+Results/sessions.xlsx
+  ONE ROW PER INPUT ACQUISITION SESSION. Columns:
+    session: session directory name and pooled ID prefix
+    source_path: original absolute/local session path (may become stale)
+    stage3_completed_utc: reported Stage 3 completion timestamp
+    spectral_variant: active spectrum variant
+    n_objects: number of object/mask observations in that session
+    n_samples: number of sample folders with corrected cubes
+    color_images: whether color RGB output was enabled for the session
+  Use to audit acquisition-session provenance and sample composition.
+  n_objects and n_samples are counts, NOT numbers of independent replicates.
+
+Results/objects.xlsx
+  ONE ROW PER OBJECT MASK, pooled across sessions. Columns:
+    object: UNIQUE session-qualified object identifier (primary join key)
+    sample: session-qualified sample folder path
+    mask: mask ID within the sample
+    mask_pixels: number of pixels included in the spatial mask
+    session: acquisition session ID
+  `mask_pixels` counts mask area, not necessarily spectrally valid pixels at
+  every band. Multiple rows can refer to masks from the same sample.
+
+Results/selected_indices.xlsx
+  ONE ROW PER INDEX USED FOR PROJECT-WIDE STAGE 4. Columns:
+    index: exact index name (case-sensitive)
+    formula: expression recorded for compatibility checking
+  Use these definitions as the exact active formula list, rather than assuming
+  every index supported by the software was calculated. The pooled file keeps
+  index/formula; more complete band metadata may be in by_session copies.
+
+Results/indices_selected.xlsx
+  ONE ROW PER SESSION-QUALIFIED OBJECT, pooled across sessions. Key column:
+    sample: despite the column name, this is the UNIQUE OBJECT ID and matches
+            Results/objects.xlsx:object, NOT Results/objects.xlsx:sample.
+  Additional columns can include:
+    session: acquisition session ID
+    spectral_variant: variant used for these object-level indices
+    hue_source: source note, usually 'raw_calibrated_reflectance'
+    <INDEX>: numerical index of the selected mean spectrum
+    <INDEX>_interpolated: boolean flag indicating linear interpolation of
+                           one or more required spectral band centers
+  A row is an analyzed mask/object. A blank index cell may mean missing bands,
+  invalid signal/denominator, no valid data, or another calculation constraint;
+  check interpolation flags and source tables. Do not treat blanks as zeros.
+  Use this table for object-level treatment comparisons and regression only
+  after checking experimental replication and independence.
+
+Results/spectra_mean_<active_variant>.xlsx
+  WIDE OBJECT-LEVEL SPECTRAL MATRIX. Columns:
+    wavelength: wavelength in nanometers (one row per recorded band)
+    <session-qualified-object-ID>: spectral value for that object at that band
+  The active variant is specified by experiment_comparison_config.json.
+  raw: unmodified mean reflectance/signal per object
+  raw_normalized: raw object mean spectrum divided by its own mean across
+                  finite recorded wavelength bands
+  savgol: Savitzky-Golay smoothed object mean spectrum
+  savgol_normalized: smoothed mean spectrum divided by its own finite-band mean
+  Important: spectra are object means, not individual-pixel spectra. PCA is
+  fitted on objects (rows after transposing this matrix); wavelengths are
+  explanatory features. The same recorded wavelength grid is required across
+  pooled sessions and is validated before merging.
+
+Results/experiment_objects.xlsx
+  ONE ROW PER POOLED OBJECT WITH EXPERIMENTAL CLASSIFICATION. Columns:
+    object: unique pooled object ID, matches objects.xlsx:object
+    sample: session-qualified sample folder path
+    session: acquisition session folder name
+    mask: analyzed mask ID
+    genotype_code, genotype_display
+    environment_code, environment_display
+    date_code, date_display
+    status: 'ok' or a string identifying unmatched/ambiguous code dimensions
+  Only status='ok' observations enter date-specific Stage 4 graphs and PCA.
+  Codes are case-insensitive SUBSTRING matches on sample folder names; the
+  observation date may fall back to the session folder name when no sample-date
+  code matches. Code-based assignment is not external metadata validation.
+  Rows with status!='ok' are important quality-control records: do not assign
+  them to an experimental group by guessing.
+
+Results/experiment_grouping.xlsx
+  ONE ROW PER REQUESTED INDEX/IMAGE TYPE x SAMPLE x MASK (when collages run).
+  Typical columns:
+    sample: relative path to sample, potentially including session prefix
+    session, sample_folder, mask
+    genotype_code/display, environment_code/display, date_code/display
+    index: exact spectral index name or 'Color_RGB' for RGB visualization
+    image_path: source PNG path (may be stale if project folder is moved)
+    status: 'ok', 'missing_map', or unmatched/ambiguous classification
+    collage_path: target date-wise collage path
+    collected_map_path: target path for copied individual PNG
+  This is an IMAGE MANIFEST, not a numerical index table. It connects source
+  sample+mask maps to organized per-date visual outputs. Each image is one
+  object-region view; there may be several maps per sample and many rows per
+  object. Missing files and unmatched groups must be acknowledged.
+
+Results/experiment_comparison_summary.xlsx
+  ONE ROW PER OBSERVATION DATE WITH CLASSIFIED DATA. Columns:
+    date_code, date_display
+    n_object_masks: number of classified object-mask rows for that date
+    n_samples: number of distinct session-qualified sample folders
+    n_sessions: number of acquisition sessions represented
+    n_indices: number of numerical index types plotted
+    spectrum_variant: active object spectrum variant
+  A date with no classified objects can lack a row, even when an empty date
+  folder exists. These are inventory counts, not inferential results.
+
+5. DATE-SPECIFIC OUTPUTS: Results/by_date/<date-code>/
+------------------------------------------------------
+Each date folder aggregates ALL eligible objects of that date, including those
+from different acquisition sessions. The directory name is a sanitized
+technical date code, not necessarily a calendar date. Human-readable titles
+come from dates_display. Do not interpret lexicographic folder order as a
+measurement timeline unless verified against experimental metadata.
+
+index_observations.xlsx
+  ONE ROW PER CLASSIFIED OBJECT FOR THIS DATE. Combines the classification
+  fields from experiment_objects.xlsx with the selected numerical index values
+  from indices_selected.xlsx. The join uses
+      experiment_objects.object == indices_selected.sample
+  Expect object, sample/session/mask, genotype/environment/date labels, status,
+  spectral_variant/hue_source where available, and one column per active index
+  plus corresponding _interpolated flags. This is the most convenient table
+  for date-level genotype-by-environment exploration and statistical models.
+  Avoid treating multiple masks from one sample as independent plants.
+
+group_spectrum_stats.xlsx
+  LONG TABLE of group-by-wavelength spectral summaries. Typical fields:
+    date_display, genotype_display, environment_display
+    wavelength: nanometers
+    n_objects: number of object spectra in the group
+    mean: arithmetic mean of object-level values for the selected variant
+    sd: sample standard deviation across object spectra (ddof=1)
+  The same source underlies spectra_by_genotype_environment.png.
+  A group with one object has undefined (blank) SD. A group's n_objects is not
+  automatically a biological replicate count. Missing wavelengths require
+  careful handling; do not interpolate/replace without documenting the rule.
+
+spectra_by_genotype_environment.png
+  Descriptive chart: a separate plotting axis/panel for each genotype, lines
+  for each environment, and optional semi-transparent +/-1 SD bands (when
+  n_objects>1). Values are object means from the SELECTED spectral variant.
+  It shows trends but is not a test of genotype/treatment significance.
+
+index_boxplots/<INDEX>.png
+  ONE IMAGE PER SELECTED NUMERICAL INDEX AND DATE, when generated.
+  Within a genotype panel, environments are categories. Each point is one
+  OBJECT MASK measurement of the index from its mean spectrum; boxplots
+  summarize the same object-level values. Scatter x-jitter is visual only.
+  Distributions shown in these figures are NOT histograms of index-map pixels.
+  Quantitative comparisons should use index_observations.xlsx instead of
+  estimating values from the PNG image.
+
+pca/objects_pca.png
+  Scatter plot of the first two principal components of the SELECTED MEAN
+  SPECTRA, fitted SEPARATELY for this observation date. Figure labels use
+  user-specified display names for genotype/environment. Mask IDs may appear
+  next to points. The PCA coordinate system is date-specific; axes and score
+  values are not directly comparable across separate date-specific PCA fits.
+
+pca/objects_pca_scores.xlsx
+  Rows correspond to objects retained in the date-specific PCA. Columns:
+    object: pooled object ID
+    date_display, genotype_display, environment_display
+    PC1, PC2: scores of first two fitted PCA components
+    cluster: optional 1-based K-means cluster label
+  PCA is skipped when fewer than three analyzable objects exist or the data
+  have insufficient spectral variation. Objects with incomplete spectra can
+  be excluded. PCA may interpolate missing bands only INSIDE the measured
+  wavelength grid before excluding still-incomplete object spectra.
+  Cluster numbering is arbitrary, not a biological group label.
+
+pca/objects_pca_variance.xlsx
+  component: 'PC1' or 'PC2'
+  explained_variance_ratio: fraction of this date's spectral variance
+                            explained by the component (0..1)
+  Multiply by 100 for percentages; the table is specific to this PCA fit.
+
+pca/objects_pca_loadings.xlsx
+  wavelength: measured band center (nm)
+  PC1_loading, PC2_loading: fitted component coefficients at each wavelength
+  Used to interpret the spectral wavelengths driving the two PCA directions.
+  Loadings and component signs are tied to this date's PCA and preprocessing;
+  signs can flip without changing the substantive model.
+
+pca/objects_pca_cluster_diagnostics.xlsx  [OPTIONAL]
+  k: candidate number of K-means clusters
+  silhouette: silhouette coefficient for the candidate solution
+  Created only when sample count and clustering conditions permit. The
+  software may choose the candidate with the highest tested silhouette score.
+  This is exploratory unsupervised clustering and is not validation of
+  experimental treatment categories. K-means is fitted on the selected FULL
+  spectral vectors, not only the plotted PC1/PC2 scores.
+
+collages/collage_<INDEX>.png  [OPTIONAL]
+  Composite image assembling source pixelwise index maps for one date.
+  Each cell is a genotype x environment combination, potentially containing
+  multiple sample/mask tiles from multiple sessions. The axis orientation is
+  given by experiment_grouping_config.json: genotypes_as_columns is True or
+  False. Human-readable _display labels are used in the composite image.
+  Each map's colors may be directly compared only when its color limits are
+  consistent. The index maps may be scaled by a session-wide or configured
+  range, which does NOT automatically mean identical limits across sessions.
+
+collages/collage_Color_RGB.png  [OPTIONAL]
+  Composite of spectral colorimetric RGB images under the same layout.
+  RGB output is a visualization of calibrated spectral reflectance, not a
+  numerical vegetation index or a spectrophotometer-grade absolute color
+  reference. Images contain no index heatmap scale.
+
+maps_by_index/<INDEX>/<genotype-display>__<environment-display>/*.png  [OPTIONAL]
+  COPIES of the actual source PNG maps, organized by date, metric, and group.
+  The final filenames incorporate session/sample/mask identity and a short
+  hash to avoid collisions across acquisition sessions. These are raster
+  visualizations, NOT arrays of raw index values. Consult the source data
+  tables or calibrated cube for numerical analysis.
+
+maps_by_index/Color_RGB/<genotype-display>__<environment-display>/*.png [OPTIONAL]
+  COPIES of colorimetric RGB images per object/mask. RGB colors are derived by
+  integrating measured reflectance over available visible bands (typically
+  400..780 nm), using CIE 1931 2-degree observer and D65 illuminant, followed
+  by XYZ-to-sRGB conversion, encoding, and display gamut clipping. Masked-out
+  pixels are shown as background; no thermal colorbar or index caption is
+  superimposed on these individual images. Source imagery may be absent if
+  disabled or if color conversion failed.
+
+6. SESSION-SPECIFIC OUTPUTS: Results/by_session/<session>/
+---------------------------------------------------------
+This folder is an unchanged copy of the CONTENTS of the source session's
+root object_analysis/ folder. Session copies are the best place to inspect
+how a pooled result was originally calculated, but they are not complete
+copies of the raw acquisition or every per-sample output directory.
+
+objects.xlsx
+  Session-local list of objects; object ID typically
+  <relative-sample-path>::<mask-id>, without the pooled session prefix.
+  Fields: object, sample, mask, mask_pixels.
+
+spectra_long.xlsx
+  ONE ROW PER OBJECT x WAVELENGTH. Columns:
+    sample: session-local OBJECT ID (not just the sample folder)
+    wavelength: nm
+    mean_intensity: mean per-band value across valid pixels in its mask
+    std_intensity: population standard deviation across pixels (ddof=0)
+    n_pixels: number of valid pixels contributing to this specific band
+    sg_mean_intensity: Savitzky-Golay smoothed object mean spectrum
+    raw_normalized_mean: original spectrum divided by its own finite-band mean
+    savgol_normalized_mean: smoothed spectrum divided by its own finite-band mean
+  n_pixels can differ across wavelength because valid-pixel masks can change
+  by channel. Do not confuse std_intensity (within-mask spatial spread) with
+  group_spectrum_stats.xlsx:sd (across-object spread).
+
+spectra_mean_raw.xlsx
+spectra_mean_raw_normalized.xlsx
+spectra_mean_savgol.xlsx
+spectra_mean_savgol_normalized.xlsx
+  Wide tables: wavelength column and one column for each SESSION-LOCAL object
+  ID. The four variants preserve original spectra while allowing optional
+  smoothing and own-mean normalization. The spectral_variant recorded in
+  analysis_settings.json controls which variant is active for Stage 4.
+
+spectra_raw.png
+spectra_raw_normalized.png
+spectra_savgol.png
+spectra_savgol_normalized.png
+  Session-local plots of all object-mean spectra for the named variant.
+
+indices_raw.xlsx
+indices_raw_normalized.xlsx
+indices_savgol.xlsx
+indices_savgol_normalized.xlsx
+  ONE ROW PER SESSION-LOCAL OBJECT and variant. Typical columns:
+    sample: session-local object ID
+    spectral_variant: one of four variants
+    hue_source: metadata describing Hue_LCh source
+    <INDEX>: index calculated from that variant of the OBJECT MEAN spectrum
+    <INDEX>_interpolated: whether a required band center was interpolated
+  Even for normalized variants, Hue_LCh is derived from the original
+  UNNORMALIZED calibrated spectrum, not the normalized spectrum.
+
+indices_selected.xlsx
+  Duplicate view of the index table for the selected active variant; it is
+  the source of the pooled Results/indices_selected.xlsx.
+
+analysis_settings.json
+  Stage 3 processing metadata. Typical keys:
+    stage3_completed_utc, spectral_variant, available_variants
+    indices_based_on, pixelwise_index_maps_based_on
+    Hue_LCh_based_on, mean_normalization, reflectance_caution
+    render_color_images, color_image_name (when maps were generated)
+  This file documents how index tables and maps should be interpreted.
+
+selected_indices.xlsx
+  One row per index selected during Stage 3. Columns:
+    index, formula, wavelengths_nm, formula_fingerprint
+  Crucial for determining which indices were really computed and for
+  verifying compatibility between sessions. Some supported indices may have
+  been excluded by a preset or custom selection.
+
+selected_indices.json
+  Machine-readable mapping of active index names to formulas plus a
+  formula_fingerprint. Provided for reproducibility and map cache checks.
+
+index_ranges_by_object.xlsx
+  ONE ROW PER SESSION-LOCAL OBJECT x INDEX, summarizing valid NUMERICAL pixel
+  values on the masked spatial index map. Fields:
+    sample: OBJECT ID (not simple sample-folder ID)
+    index, n_valid_pixels, observed_min, observed_max, p02, p98
+    sample_path, mask
+    histogram_bins, histogram_bin_width
+    bin_01_count ... bin_10_count  (default, number configurable)
+  p02 and p98 are the 2nd and 98th percentiles of valid index-map pixels.
+  Some bins are missing when histogram_bins is not 10; read the actual headers.
+  Counts exclude non-finite values and pixels outside the selected mask.
+  These are pixels (spatially correlated), not independent biological replicates.
+
+index_histogram_bins.xlsx
+  LONG table: one row per object-mask x index x bin. Fields:
+    sample: sample-folder path (not pooled object ID)
+    mask, index, bin_number, bin_lower, bin_upper, upper_inclusive
+    pixel_count, pixel_fraction, n_valid_pixels, observed_min, observed_max
+  Bins are equal-width subdivisions of EACH OBJECT'S OWN observed min..max.
+  Bins 1..(N-1) represent [lower,upper), last bin [lower,upper].
+  Constant-valued maps put all valid pixels in the first zero-width bin.
+  When there are no valid pixels, counts are zero and bounds may be blank.
+  IMPORTANT: 'bin 1' in two different objects generally has DIFFERENT
+  numerical boundaries. Compare bin ranges, rebin onto COMMON boundaries, or
+  compare normalized distribution summaries rather than blindly comparing
+  bin-number counts across experimental treatments.
+
+index_color_bounds.xlsx
+  ONE ROW PER INDEX: index, vmin, vmax, source.
+  Describes the applied common WITHIN-SESSION color scale for the index maps.
+  Limits may be fixed, empirically derived, or fallback defaults.
+  They affect PNG rendering, NOT the underlying numerical index values.
+  Different sessions can have different empirical limits: verify before
+  comparing color shades across pooled collages.
+
+index_maps_report.xlsx
+  ONE ROW PER SAMPLE x OBJECT MASK x INDEX/IMAGE TYPE. Columns:
+    sample, mask, index, output_png, valid_pixels, vmin, vmax, scale,
+    missing_bands, visualization_type
+  visualization_type='index_map' for numeric map visualization;
+  visualization_type='color_rgb' for Color_RGB image, if requested.
+  RGB rows can have blank vmin/vmax. A generated report row alone does not
+  prove its PNG is present; check the filesystem and conversion warnings.
+  Paths may point outside Results and become stale after copying/moving files.
+
+Other files in by_session/<session>/
+  Some sessions may contain legacy CSV reports, supplemental JSON, images, or
+  older Stage 4 files inside their own object_analysis/. Their exact structure
+  depends on the version originally run. Do not infer modern semantics from
+  names alone. Compare with actual headers and generation metadata.
+
+7. IMAGES, SPATIAL PCA, AND RAW CUBES OUTSIDE Results/
+----------------------------------------------------
+Stage 3 stores per-object source PNGs primarily at:
+  PROJECT/<session>/<sample>/object_analysis/index_maps/<mask-id>/<INDEX>.png
+  PROJECT/<session>/<sample>/object_analysis/index_maps/<mask-id>/Color_RGB.png
+
+The per-sample corrected hyperspectral cube is generally at:
+  PROJECT/<session>/<sample>/corrected_images/corrected_cube.npz
+
+Masks may be located in:
+  PROJECT/<session>/<sample>/masks/<mask-id>.png
+  or a legacy PROJECT/<session>/<sample>/wheat_mask.png
+
+Optional per-sample spatial PCA outputs can be stored in:
+  PROJECT/<session>/<sample>/pca_maps/<mask-id>/
+
+The camera's original or user-saved images may be in Data/, Images/,
+and Spectral_Cube/ directories within acquisition folders. A color preview
+used to CREATE a mask may have been saved under Images/mask_preview.png;
+it is not the same output as the Color_RGB image rendered from the
+quantitative calibrated cube during Stage 3.
+
+Neither Results/by_session/ nor Results/by_date/ necessarily includes the
+calibrated NPZ cubes, original camera bands, original object mask files, or
+spatial PCA maps. If an agent requires exact per-pixel index values, raw or
+calibrated spectra, new shared-bin histograms, mask geometry, or camera QC,
+it must explicitly request the relevant original session/sample data.
+A PNG heatmap alone cannot recover full-precision index values.
+
+8. INDEX CATALOG AND INTERPRETATION
+-----------------------------------
+The code provides three nested presets:
+  minimal: 8 indices
+  medium: 22 indices (includes CSIB, two EWRI ratios, and Hue_LCh)
+  maximum: 36 indices
+But custom subsets may be used. ACTUAL indices are those in
+Results/selected_indices.xlsx, not necessarily the full catalog.
+
+Notation: R410 denotes reflectance at 410 nm; expressions use interpolated
+band values when required band centers fall between measured bands.
+Interpolation is linear WITHIN measured spectral coverage; the pipeline does
+not extrapolate wavelengths outside the acquired range. Small/zero
+denominators and missing/invalid data can yield missing values. The formula
+stored with each index is the primary source of truth.
+
+Hue_LCh: Spectral CIELCh(ab) hue angle in DEGREES, [0,360), computed using
+CIE 1931 2-degree observer and D65 from the calibrated reflectance over the
+available 400..780 nm subset. It is a CIRCULAR variable (e.g. 359 and 1 deg
+are close). It is NOT HSV hue used in image-based mask thresholding. The
+camera lacks the standard 380..390 nm short-wavelength segment, so the
+colorimetric reconstruction is approximate.
+
+CSIB = R525/R800: Brassica-origin climate-stress ratio, exploratory in wheat;
+no species-specific diagnostic validation is asserted.
+
+EWRI_410_900 = R410/R900 and EWRI_410_950 = R410/R950: experimental epicuticular
+wax descriptors. Differences may also reflect chlorophyll, leaf structure,
+illumination geometry, spectral calibration, or sensor noise. Do NOT infer
+wax quantity or wax quality without independent chemical/physical validation.
+
+Indices containing additive constants, inverse reflectance terms, or absolute
+scale assumptions may have materially different meanings when evaluated on
+mean-normalized spectra. Ratio indices are generally invariant to a shared
+multiplicative scale, but not necessarily to offsets. Record the active
+spectral_variant in every analysis. A numeric index is not automatically a
+specific, validated plant physiological trait.
+
+CURRENT SOFTWARE INDEX FORMULAS (subject to active selection and code version):
+  01. NDVI [minimal]
+      Formula: (R800-R680)/(R800+R680)
+      Meaning/name: Normalized Difference Vegetation Index
+      Required bands (nm): 800, 680
+      Multiplicative-scale invariant in code metadata: True
+  02. GNDVI [medium]
+      Formula: (R800-R550)/(R800+R550)
+      Meaning/name: Green Normalized Difference Vegetation Index
+      Required bands (nm): 800, 550
+      Multiplicative-scale invariant in code metadata: True
+  03. NDRE [minimal]
+      Formula: (R790-R720)/(R790+R720)
+      Meaning/name: Normalized Difference Red Edge
+      Required bands (nm): 790, 720
+      Multiplicative-scale invariant in code metadata: True
+  04. NDVI705 [medium]
+      Formula: (R750-R705)/(R750+R705)
+      Meaning/name: Red-edge normalized difference
+      Required bands (nm): 750, 705
+      Multiplicative-scale invariant in code metadata: True
+  05. CIgreen [medium]
+      Formula: R790/R550-1
+      Meaning/name: Green Chlorophyll Index
+      Required bands (nm): 790, 550
+      Multiplicative-scale invariant in code metadata: True
+  06. CIrededge [medium]
+      Formula: R790/R710-1
+      Meaning/name: Red-edge Chlorophyll Index
+      Required bands (nm): 790, 710
+      Multiplicative-scale invariant in code metadata: True
+  07. VOG1 [maximum]
+      Formula: R740/R720
+      Meaning/name: Vogelmann Red-edge Index 1
+      Required bands (nm): 740, 720
+      Multiplicative-scale invariant in code metadata: True
+  08. MTCI [medium]
+      Formula: (R754-R709)/(R709-R681)
+      Meaning/name: MERIS Terrestrial Chlorophyll Index (original bands)
+      Required bands (nm): 754, 709, 681
+      Multiplicative-scale invariant in code metadata: True
+  09. PRI [minimal]
+      Formula: (R531-R570)/(R531+R570)
+      Meaning/name: Photochemical Reflectance Index
+      Required bands (nm): 531, 570
+      Multiplicative-scale invariant in code metadata: True
+  10. PSRI [minimal]
+      Formula: (R680-R500)/R750
+      Meaning/name: Plant Senescence Reflectance Index
+      Required bands (nm): 680, 500, 750
+      Multiplicative-scale invariant in code metadata: True
+  11. SIPI [medium]
+      Formula: (R800-R445)/(R800-R680)
+      Meaning/name: Structure Insensitive Pigment Index
+      Required bands (nm): 800, 445, 680
+      Multiplicative-scale invariant in code metadata: True
+  12. ARI2 [minimal]
+      Formula: R800*(1/R550-1/R700)
+      Meaning/name: Anthocyanin Reflectance Index 2
+      Required bands (nm): 550, 700, 800
+      Multiplicative-scale invariant in code metadata: True
+  13. CRI1 [maximum]
+      Formula: 1/R510-1/R550
+      Meaning/name: Carotenoid Reflectance Index 1
+      Required bands (nm): 510, 550
+      Multiplicative-scale invariant in code metadata: False
+  14. CRI2 [minimal]
+      Formula: 1/R510-1/R700
+      Meaning/name: Carotenoid Reflectance Index 2
+      Required bands (nm): 510, 700
+      Multiplicative-scale invariant in code metadata: False
+  15. WBI [minimal]
+      Formula: R970/R900
+      Meaning/name: Plant Water Index (Peñuelas et al. 1993 convention)
+      Required bands (nm): 970, 900
+      Multiplicative-scale invariant in code metadata: True
+  16. RGI [maximum]
+      Formula: R690/R550
+      Meaning/name: Red-Green Index
+      Required bands (nm): 690, 550
+      Multiplicative-scale invariant in code metadata: True
+  17. R750_R700 [maximum]
+      Formula: R750/R700
+      Meaning/name: Red-edge chlorophyll ratio
+      Required bands (nm): 750, 700
+      Multiplicative-scale invariant in code metadata: True
+  18. mND705 [medium]
+      Formula: (R750-R705)/(R750+R705-2*R445)
+      Meaning/name: Modified ND705
+      Required bands (nm): 750, 705, 445
+      Multiplicative-scale invariant in code metadata: True
+  19. REP [medium]
+      Formula: 700+40*((R670+R780)/2-R700)/(R740-R700)
+      Meaning/name: Red Edge Position, linear four-band estimate (nm)
+      Required bands (nm): 670, 780, 700, 740
+      Multiplicative-scale invariant in code metadata: False
+  20. MCARI [maximum]
+      Formula: ((R700-R670)-0.2*(R700-R550))*(R700/R670)
+      Meaning/name: Modified Chlorophyll Absorption Ratio Index
+      Required bands (nm): 700, 670, 550
+      Multiplicative-scale invariant in code metadata: False
+  21. TCARI [maximum]
+      Formula: 3*((R700-R670)-0.2*(R700-R550)*(R700/R670))
+      Meaning/name: Transformed Chlorophyll Absorption Ratio Index
+      Required bands (nm): 700, 670, 550
+      Multiplicative-scale invariant in code metadata: False
+  22. TVI [maximum]
+      Formula: 0.5*(120*(R750-R550)-200*(R670-R550))
+      Meaning/name: Triangular Vegetation Index
+      Required bands (nm): 750, 550, 670
+      Multiplicative-scale invariant in code metadata: False
+  23. DVI [maximum]
+      Formula: R800-R680
+      Meaning/name: Difference Vegetation Index
+      Required bands (nm): 800, 680
+      Multiplicative-scale invariant in code metadata: False
+  24. RDVI [maximum]
+      Formula: (R800-R670)/sqrt(R800+R670)
+      Meaning/name: Renormalized Difference Vegetation Index
+      Required bands (nm): 800, 670
+      Multiplicative-scale invariant in code metadata: False
+  25. OSAVI [minimal]
+      Formula: 1.16*(R800-R670)/(R800+R670+0.16)
+      Meaning/name: Optimized Soil Adjusted Vegetation Index
+      Required bands (nm): 800, 670
+      Multiplicative-scale invariant in code metadata: False
+  26. SAVI [maximum]
+      Formula: 1.5*(R800-R680)/(R800+R680+0.5)
+      Meaning/name: Soil Adjusted Vegetation Index (L=0.5)
+      Required bands (nm): 800, 680
+      Multiplicative-scale invariant in code metadata: False
+  27. EVI [maximum]
+      Formula: 2.5*(R800-R680)/(R800+6*R680-7.5*R450+1)
+      Meaning/name: Enhanced Vegetation Index
+      Required bands (nm): 800, 680, 450
+      Multiplicative-scale invariant in code metadata: False
+  28. MSAVI [medium]
+      Formula: (2*R800+1-sqrt((2*R800+1)^2-8*(R800-R670)))/2
+      Meaning/name: Modified Soil Adjusted Vegetation Index
+      Required bands (nm): 800, 670
+      Multiplicative-scale invariant in code metadata: False
+  29. MCARI_OSAVI [maximum]
+      Formula: MCARI/OSAVI
+      Meaning/name: MCARI divided by OSAVI
+      Required bands (nm): 700, 670, 550, 800
+      Multiplicative-scale invariant in code metadata: False
+  30. TCARI_OSAVI [medium]
+      Formula: TCARI/OSAVI
+      Meaning/name: TCARI divided by OSAVI
+      Required bands (nm): 700, 670, 550, 800
+      Multiplicative-scale invariant in code metadata: False
+  31. NPCI [maximum]
+      Formula: (R680-R430)/(R680+R430)
+      Meaning/name: Normalized Pigment Chlorophyll Index
+      Required bands (nm): 680, 430
+      Multiplicative-scale invariant in code metadata: True
+  32. NPQI [maximum]
+      Formula: (R415-R435)/(R415+R435)
+      Meaning/name: Normalized Phaeophytinization Index (published band centers)
+      Required bands (nm): 415, 435
+      Multiplicative-scale invariant in code metadata: True
+  33. CSIB [medium]
+      Formula: R525/R800
+      Meaning/name: Brassica climate-stress index (exploratory for wheat)
+      Required bands (nm): 525, 800
+      Multiplicative-scale invariant in code metadata: True
+  34. EWRI_410_900 [medium]
+      Formula: R410/R900
+      Meaning/name: Epicuticular Wax Ratio Index (experimental)
+      Required bands (nm): 410, 900
+      Multiplicative-scale invariant in code metadata: True
+  35. EWRI_410_950 [medium]
+      Formula: R410/R950
+      Meaning/name: Epicuticular Wax Ratio Index (experimental)
+      Required bands (nm): 410, 950
+      Multiplicative-scale invariant in code metadata: True
+  36. Hue_LCh [medium]
+      Formula: atan2(b*,a*) mod 360; R400..R780 integrated under D65
+      Meaning/name: CIELCh(ab) spectral hue h_ab [degrees], D65/CIE1931 2°, 400–780 nm
+      Required bands (nm): 400, 410, 420, 430, 440, 450, 460, 470, 480, 490, 500, 510, 520, 530, 540, 550, 560, 570, 580, 590, 600, 610, 620, 630, 640, 650, 660, 670, 680, 690, 700, 710, 720, 730, 740, 750, 760, 770, 780
+      Multiplicative-scale invariant in code metadata: False
+
+9. JOIN GUIDE FOR AI / DATA SCIENCE TOOLS
+----------------------------------------
+Recommended joins (perform these using exact IDs, never visual name guesses):
+
+  Results/objects.xlsx.object
+        == Results/experiment_objects.xlsx.object
+        == Results/indices_selected.xlsx.sample
+        == Results/by_date/<date>/index_observations.xlsx.object
+        == Results/by_date/<date>/pca/objects_pca_scores.xlsx.object
+
+  Results/spectra_mean_<variant>.xlsx column headers (except 'wavelength')
+        == Results/objects.xlsx.object
+
+  Results/by_session/<session>/objects.xlsx.object
+        needs <session>/ prefix before joining to pooled Results/objects.xlsx.
+
+  Results/by_session/<session>/index_histogram_bins.xlsx:
+        identify an object from (session, sample, mask, index, bin_number).
+        The 'sample' column here is usually a sample-folder path, while
+        'sample' in indices_selected.xlsx is an OBJECT ID. They are NOT
+        interchangeable and must never be joined directly without checking.
+
+  Results/experiment_grouping.xlsx:
+        use (sample, mask, index, date_code) and status to locate source and
+        collected PNGs; status='ok' is required for inclusion in collages.
+
+Prefer the technical code columns for stable grouping and the _display
+columns for charts and human-facing reports. Do not infer biological grouping
+from an image label if structured metadata is present.
+
+10. SCIENTIFIC AND STATISTICAL CAUTIONS
+--------------------------------------
+A. Measurement unit:
+   One object mask is one computational observation; several masks can belong
+   to the same plant, image, pot, plot, or acquisition. A mask pixel is never
+   automatically an independent replicate. Biological experimental unit and
+   randomization must be supplied separately for hypothesis testing.
+
+B. Nested data and acquisition effects:
+   Date, session, genotype, treatment, sample, and mask may be nested or
+   crossed. A single date can pool sessions with different imaging conditions.
+   Between-session calibration, aperture, illumination, and camera changes can
+   create batch effects. Check session distributions and consider mixed-effects
+   or blocked designs when replication permits.
+
+C. Repeated measures:
+   The code does not prove that similarly named objects on different dates
+   are the same biological individual. Longitudinal trajectory analysis
+   requires an external subject/plant identifier and measurement schedule.
+
+D. Spectral measurement:
+   Band centers may be interpolated; no out-of-range extrapolation is allowed.
+   Check short blue wavelengths (especially 410 nm) and near-IR edge channels
+   (especially 950/970 nm) for signal-to-noise and calibration artifacts.
+   Missing values may be nonrandom (e.g. saturation or segmentation failure).
+
+E. Mean-normalized spectra:
+   Own-mean normalization suppresses overall brightness and emphasizes shape.
+   It can alter the interpretation of non-scale-invariant indices and is not
+   equivalent to calibrating reflectance. Keep the raw variant available for
+   physical/biochemical interpretation and run sensitivity analyses if needed.
+
+F. Index-of-mean versus pixelwise distribution:
+   indices_selected.xlsx reports a ratio/formula applied to the object MEAN
+   spectrum. index_ranges_by_object.xlsx and index_histogram_bins.xlsx
+   describe the DISTRIBUTION of the index formula applied to individual
+   pixels. Even a simple ratio generally satisfies:
+       index(mean spectrum) != mean(index at each pixel)
+   These sources answer distinct questions and should not be conflated.
+
+G. Map colors and RGB:
+   PNG maps are visualizations. Check index_color_bounds.xlsx by session
+   before interpreting equivalent colors as equivalent index magnitudes.
+   RGB rendering involves D65 assumptions and sRGB encoding/gamut clipping;
+   monitor calibration and light adaptation may affect perceived colors.
+   RGB images cannot replace quantitative spectral data.
+
+H. Hue circular statistics:
+   Hue_LCh should be analyzed with circular methods or circularly aware
+   transformations when values span the 0/360 boundary. Straight arithmetic
+   means, SD, correlations, and ordinary boxplots can be misleading.
+
+I. PCA and clustering:
+   PCA models are recomputed independently for each date. PC1 on one date
+   is not necessarily the same spectral direction as PC1 on another date.
+   PC signs are arbitrary. K-means cluster labels are unsupervised and
+   algorithm-dependent, not ground-truth treatment effects.
+
+J. Statistics and multiplicity:
+   There may be many correlated indices and many genotype/environment
+   comparisons. Distinguish exploratory analyses from planned hypotheses,
+   control false discoveries where appropriate, and report effect sizes and
+   uncertainty intervals as well as any p-values. Beware pseudoreplication,
+   small groups, imbalance, missing classes, and multiple masks per sample.
+
+K. Validation of experimental wax indices:
+   EWRI_410_900 and EWRI_410_950 are experimental contrasts, not validated
+   direct measurements of cuticular wax quantity/composition. Discuss them
+   as associations unless tested against independent wax measurements.
+
+11. RECOMMENDED AGENT ANALYSIS WORKFLOW
+---------------------------------------
+(1) Inventory the supplied folder. Report present/missing expected files,
+    file formats, dates, sessions, groups, selected indices, and object counts.
+    Do not claim that absent optional outputs were computed.
+
+(2) Read experiment_comparison_config.json and, if present,
+    experiment_grouping_config.json. Check output_mode, spectral_variant,
+    date/genotype/environment mappings, completion timestamps, and stale flags.
+
+(3) Read sessions.xlsx, objects.xlsx, experiment_objects.xlsx,
+    selected_indices.xlsx, and indices_selected.xlsx. Check unique object IDs,
+    join cardinality, group classifications, and missing index values.
+
+(4) For the date(s) requested, use by_date/<date>/index_observations.xlsx for
+    individual object-level index values. Inspect n_objects, n_samples,
+    n_sessions, and numbers of unique experimental units if supplied.
+
+(5) Explore group summaries using robust descriptive statistics (median,
+    IQR, mean, SD, count); display raw points and uncertainty. Explain which
+    objects or experimental units are being counted. Do not present pixels
+    as independent biological replicates.
+
+(6) Examine spectra_mean_<variant>.xlsx and by_date group_spectrum_stats.xlsx
+    to find wavelength regions associated with group differences. Keep any
+    spectra-derived claims consistent with the active spectral variant and
+    with the number of contributing independent units.
+
+(7) Review PCA scores, loadings, variance, and clustering as exploratory
+    structure. Evaluate potential session-specific separation and outliers.
+    Do not combine PCA coordinates from different date-wise models directly.
+
+(8) If within-object spatial heterogeneity is of interest, consult session
+    copies of index_ranges_by_object.xlsx and index_histogram_bins.xlsx.
+    Align histograms onto common numerical bin boundaries before comparing
+    shapes across samples; use mask/sample/session IDs for provenance.
+
+(9) Use collages and collected maps as qualitative cross-checks (segmentation,
+    spatial artifacts, illumination gradients, leaf texture) but perform
+    quantitative calculations on spreadsheets or calibrated cubes, not PNGs.
+
+(10) Only after learning the experimental design, assess formal inferential
+     tests (factorial models, hierarchical models, repeated measures,
+     permutation tests, multivariate methods). Define the independent
+     experimental unit, nesting/blocking, target contrasts, and multiplicity.
+
+(11) Report results separately as: direct numerical observations, exploratory
+     patterns, inferentially supported findings, and unresolved limitations.
+     Include effect sizes, sample sizes by biological unit, missingness,
+     uncertainty, actual file/column provenance, and checks for batch effects.
+
+12. SUGGESTED INITIAL PROMPT TO AN AI AGENT
+--------------------------------------------
+"Read results_description.txt first. Inventory all files actually supplied
+under Results/. Open experiment_comparison_config.json, sessions.xlsx,
+objects.xlsx, experiment_objects.xlsx, selected_indices.xlsx,
+indices_selected.xlsx, and the relevant by_date tables. State the spectrum
+variant, selected index definitions, genotype/environment/date mappings,
+number of acquisition sessions, and classification exclusions. Verify joins
+using session-qualified object IDs. Compare object-level numerical results
+between experimental groups within each date; examine spectral trends,
+boxplots, and PCA, and check for session/batch effects and influential
+outliers. Interpret pixelwise histograms separately from indices of mean
+spectra; use valid common bin boundaries for between-group comparisons.
+Treat Hue_LCh as circular data and EWRI as experimental indices. Do not infer
+statistical significance or causal effects without verifying biological
+replication and experimental design. Provide tables of findings with source
+file/column references, effect sizes, uncertainty, and limitations. Ask for
+biological replicate IDs and treatment metadata if they are missing."
+
+END OF RESULTS DESCRIPTION
